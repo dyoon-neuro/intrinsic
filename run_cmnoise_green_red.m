@@ -1,12 +1,16 @@
-function result = run_cmnoise_kt(varargin)
-global BpodSystem
+function result = run_cmnoise_no_frame2ttl_bpod(varargin)
+
+%RUN_CMNOISE_NO_FRAME2TTL_BPOD Run the stimulus and camera standalone.
+%   This version does not draw a Frame2TTL patch and does not initialize,
+%   control, or read a Bpod state machine. Camera acquisition is started
+%   directly from MATLAB and display timing is measured with Psychtoolbox.
 
 p = inputParser;
 p.addParameter('rig',0);
 p.addParameter('skipsynctests',1);
 p.addParameter('animalid','fake');
 p.addParameter('depth','000');
-p.addParameter('repetitions',4);
+p.addParameter('repetitions',5);
 p.addParameter('stimduration',180);
 p.addParameter('isipre',3);
 p.addParameter('isipost',3);
@@ -41,15 +45,6 @@ p.addParameter('camera_save_folder','D:\intrinsic');
 p.addParameter('camera_tiff_chunk_frames',30);
 p.addParameter('camera_final_drain_timeout_sec',120);
 
-%% -------------------- Frame2TTL / Bpod parameters --------------------
-p.addParameter('frame2ttl_enabled',1);
-p.addParameter('frame2ttl_bpod_recording',1);
-p.addParameter('frame2ttl_bnc_input',1);
-p.addParameter('frame2ttl_patch_size_px',[90 90]);
-p.addParameter('frame2ttl_patch_intensity',140);
-p.addParameter('frame2ttl_patch_active_fraction',0.8);
-p.addParameter('frame2ttl_bpod_timeout_padding_sec',30);
-
 p.parse(varargin{:});
 result = p.Results;
 
@@ -58,13 +53,26 @@ result = p.Results;
 %   temporal -> nasal     = right -> left
 %   inferior -> superior  = bottom -> top
 %   superior -> inferior  = top -> bottom
-blockNames = [ ...
+baseBlockNames = [ ...
     "nasal_to_temporal"; ...
     "temporal_to_nasal"; ...
     "inferior_to_superior"; ...
     "superior_to_inferior"];
-blockAxis = [0; 0; 1; 1];       % 0: horizontal, 1: vertical
-blockReverse = [0; 1; 1; 0];    % Reverse increasing screen coordinates
+baseBlockAxis = [0; 0; 1; 1];       % 0: horizontal, 1: vertical
+baseBlockReverse = [0; 1; 1; 0];    % Reverse increasing screen coordinates
+
+blockRepetitions = result.repetitions;
+validateattributes(blockRepetitions,{'numeric'}, ...
+    {'scalar','integer','positive'});
+
+blockNames = repmat(baseBlockNames,blockRepetitions,1) + "_" + ...
+    string(repelem((1:blockRepetitions)',numel(baseBlockNames)));
+blockAxis = repmat(baseBlockAxis,blockRepetitions,1);
+blockReverse = repmat(baseBlockReverse,blockRepetitions,1);
+greenBlockNames = baseBlockNames + "_1";
+greenBlockAxis = baseBlockAxis;
+greenBlockReverse = baseBlockReverse;
+greenSweepsPerBlock = 5;
 
 result.repetitions = numel(blockNames);
 result.stimduration = ...
@@ -73,6 +81,14 @@ result.interleave = 0;
 result.block.names = blockNames;
 result.block.axis = blockAxis;
 result.block.reverse = logical(blockReverse);
+result.block.repetitions = blockRepetitions;
+result.green.repetitions_per_session = 1;
+result.green.sweeps_per_block = greenSweepsPerBlock;
+result.green.block.names = greenBlockNames;
+result.green.block.axis = greenBlockAxis;
+result.green.block.reverse = logical(greenBlockReverse);
+result.green.sessionCount = 0;
+result.green.sessions = struct([]);
 
 fprintf('Running file: %s\n',mfilename('fullpath'));
 fprintf(['Design: %d blocks x %d sweeps x %.3f sec = ' ...
@@ -103,22 +119,6 @@ validateattributes(result.contrast_period,{'numeric'}, ...
     {'scalar','positive'});
 validateattributes(result.sweeps_per_block,{'numeric'}, ...
     {'scalar','integer','positive'});
-validateattributes(result.frame2ttl_bnc_input,{'numeric'}, ...
-    {'scalar','integer','positive'});
-validateattributes(result.frame2ttl_patch_size_px,{'numeric'}, ...
-    {'vector','numel',2,'positive'});
-validateattributes(result.frame2ttl_patch_intensity,{'numeric'}, ...
-    {'scalar','integer','>=',0,'<=',255});
-validateattributes(result.frame2ttl_patch_active_fraction,{'numeric'}, ...
-    {'scalar','>',0,'<=',1});
-validateattributes(result.frame2ttl_bpod_timeout_padding_sec,{'numeric'}, ...
-    {'scalar','positive'});
-
-if result.frame2ttl_bpod_recording && ~result.frame2ttl_enabled
-    error(['frame2ttl_bpod_recording requires ' ...
-        'frame2ttl_enabled=1.']);
-end
-
 if result.repetitions < numel(result.contrast_list)
     warning(['The trial number (repetitions) is less than the number ' ...
         'of requested contrasts.']);
@@ -169,35 +169,6 @@ end
 
 [result,fnameLocal,fnameRemote] = saveFilePrep(result);
 
-%% -------------------- Bpod Frame2TTL initialization --------------------
-bpodTrialManager = [];
-bpodTrialRunning = false;
-bpodRawEvents = [];
-bpodHighEventName = sprintf( ...
-    'BNC%dHigh',result.frame2ttl_bnc_input);
-bpodLowEventName = sprintf( ...
-    'BNC%dLow',result.frame2ttl_bnc_input);
-
-if result.frame2ttl_bpod_recording
-    if isempty(BpodSystem)
-        error(['Bpod is not initialized. Run Bpod first, then connect ' ...
-            'Frame2TTL TTL OUT to Bpod BNC input %d.'], ...
-            result.frame2ttl_bnc_input);
-    end
-
-    bpodEventNames = BpodSystem.StateMachineInfo.EventNames;
-
-    if ~any(strcmp(bpodEventNames,bpodHighEventName)) || ...
-            ~any(strcmp(bpodEventNames,bpodLowEventName))
-        error('Bpod input events %s/%s are unavailable.', ...
-            bpodHighEventName,bpodLowEventName);
-    end
-
-    if exist('BpodTrialManager','class') ~= 8
-        error('BpodTrialManager class is unavailable on the MATLAB path.');
-    end
-end
-
 %% -------------------- Cross-clock calibration --------------------
 % Repeated PC-wall-clock <-> PTB GetSecs anchor pairs make it possible to
 % estimate both clock offset and drift. Wall-clock sampling is deliberately
@@ -210,19 +181,6 @@ result.clock.pcWallPosix_sec = zeros(0,1);
 result.clock.ptbGetSecs_sec = zeros(0,1);
 result.clock.anchorUncertainty_sec = zeros(0,1);
 result.clock.ptbT0GetSecs_sec = NaN;
-result.clock.bpodProtocolStartDatenum = NaN;
-
-if result.frame2ttl_bpod_recording
-    try
-        if ~isempty(BpodSystem.ProtocolStartTime)
-            result.clock.bpodProtocolStartDatenum = ...
-                BpodSystem.ProtocolStartTime/100000;
-        end
-    catch ME
-        warning('Could not store Bpod protocol start time: %s', ...
-            ME.message);
-    end
-end
 
 %% -------------------- Camera result arrays --------------------
 nTrials = result.repetitions;
@@ -259,20 +217,6 @@ result.camera.startGetSecs_sec = nan(nTrials,1);
 result.camera.stopRequestGetSecs_sec = nan(nTrials,1);
 result.camera.stopCompleteGetSecs_sec = nan(nTrials,1);
 
-result.frame2ttl.enabled = logical(result.frame2ttl_enabled);
-result.frame2ttl.bpodRecording = ...
-    logical(result.frame2ttl_bpod_recording);
-result.frame2ttl.bncInput = result.frame2ttl_bnc_input;
-result.frame2ttl.highEventName = string(bpodHighEventName);
-result.frame2ttl.lowEventName = string(bpodLowEventName);
-result.frame2ttl.bpodRawEvents = cell(nTrials,1);
-result.frame2ttl.bpodEdgeTime_sec = cell(nTrials,1);
-result.frame2ttl.bpodEdgeSessionTime_sec = cell(nTrials,1);
-result.frame2ttl.bpodEdgePolarity = cell(nTrials,1);
-result.frame2ttl.edgeCount = nan(nTrials,1);
-result.frame2ttl.bpodTrialStartTimestamp_sec = nan(nTrials,1);
-result.frame2ttl.bpodTrialEndTimestamp_sec = nan(nTrials,1);
-
 %% -------------------- Camera initialization --------------------
 vid = [];
 src = [];
@@ -282,6 +226,8 @@ cameraPreviewStarted = false;
 activeTiff = [];
 activeTiffFrameCount = 0;
 activeTrialIndex = 0;
+activeSessionType = "none";
+activeGreenSessionIndex = 0;
 activeCallbackError = [];
 callbackIsWriting = false;
 activeCameraFrameTime = zeros(0,1);
@@ -414,40 +360,9 @@ result.movieDurationFrames = ...
 result.blockDurationFrames = ...
     result.movieDurationFrames * result.sweeps_per_block;
 
-frame2ttlPatchRect = [];
-frame2ttlActiveRect = [];
-
-if result.frame2ttl_enabled
-    patchWidth = min(round(result.frame2ttl_patch_size_px(1)), ...
-        wininfo.xRes);
-    patchHeight = min(round(result.frame2ttl_patch_size_px(2)), ...
-        wininfo.yRes);
-    activeWidth = max(1,round( ...
-        patchWidth*result.frame2ttl_patch_active_fraction));
-    activeHeight = max(1,round( ...
-        patchHeight*result.frame2ttl_patch_active_fraction));
-
-    frame2ttlPatchRect = [ ...
-        wininfo.xRes-patchWidth, ...
-        wininfo.yRes-patchHeight, ...
-        wininfo.xRes, ...
-        wininfo.yRes];
-    frame2ttlActiveRect = [ ...
-        wininfo.xRes-activeWidth, ...
-        wininfo.yRes-activeHeight, ...
-        wininfo.xRes, ...
-        wininfo.yRes];
-end
-
-result.frame2ttl.patchRect = frame2ttlPatchRect;
-result.frame2ttl.activeRect = frame2ttlActiveRect;
-result.frame2ttl.patchIntensity = ...
-    result.frame2ttl_patch_intensity;
-result.frame2ttl.expectedEdgesPerBlock = ...
-    result.blockDurationFrames;
-result.frame2ttl.ptbFlipTime_sec = ...
+result.displayTiming.ptbFlipTime_sec = ...
     nan(nTrials,result.blockDurationFrames);
-result.frame2ttl.ptbMissedDeadline_sec = ...
+result.displayTiming.ptbMissedDeadline_sec = ...
     nan(nTrials,result.blockDurationFrames);
 
 Screen('FillRect',wininfo.w,[128,128,128]);
@@ -455,23 +370,105 @@ Screen('TextFont',wininfo.w,'Courier New');
 Screen('TextSize',wininfo.w,14);
 Screen('TextStyle',wininfo.w,1+2);
 
+topPriorityLevel = MaxPriority(wininfo.w);
+Priority(topPriorityLevel);
+
+%% -------------------- Green-light imaging --------------------
+try
+    repeatGreenSession = true;
+
+    while repeatGreenSession
+        Screen('FillRect',wininfo.w,[128,128,128]);
+        Screen('DrawText',wininfo.w,'GREEN-LIGHT IMAGING', ...
+            60,50,[0 255 0]);
+        Screen('DrawText',wininfo.w, ...
+            'Is the GREEN light ON? Press G to start / Q to abort.', ...
+            60,75,[0 255 0]);
+        Screen('Flip',wininfo.w);
+
+        disp(['Is the GREEN light ON? Press G to start green-light ' ...
+            'imaging / Q to abort.']);
+        greenStartChoice = wait_for_choice({'g','q'},false);
+
+        if strcmp(greenStartChoice,'q')
+            quitRequested = true;
+            break;
+        end
+
+        activeGreenSessionIndex = result.green.sessionCount + 1;
+        run_green_imaging_session(activeGreenSessionIndex);
+
+        if quitRequested
+            break;
+        end
+
+        Screen('FillRect',wininfo.w,[128,128,128]);
+        Screen('DrawText',wininfo.w, ...
+            'Green-light imaging completed.', ...
+            60,50,[0 255 0]);
+        Screen('DrawText',wininfo.w, ...
+            ['Press R to repeat green-light imaging / ' ...
+            'C to continue to the RED-light main experiment / ' ...
+            'Q to abort.'], ...
+            60,75,[0 255 0]);
+        Screen('Flip',wininfo.w);
+
+        disp(['Green-light imaging completed. Press R to repeat / ' ...
+            'C to continue to the red-light main experiment / ' ...
+            'Q to abort.']);
+        greenEndChoice = wait_for_choice({'r','c','q'},false);
+
+        if strcmp(greenEndChoice,'r')
+            repeatGreenSession = true;
+        elseif strcmp(greenEndChoice,'c')
+            repeatGreenSession = false;
+        else
+            quitRequested = true;
+            break;
+        end
+    end
+catch ME
+    cleanup_resources();
+
+    try
+        save(fnameLocal,'result','-v7.3');
+    catch
+    end
+
+    rethrow(ME);
+end
+
+if quitRequested
+    cleanup_resources();
+
+    try
+        save(fnameLocal,'result','-v7.3');
+    catch ME
+        warning('Partial result save failed: %s',ME.message);
+    end
+
+    return;
+end
+
+%% -------------------- Red-light main experiment --------------------
+Screen('FillRect',wininfo.w,[128,128,128]);
 Screen('DrawText',wininfo.w,strcat( ...
-    num2str(result.repetitions),' Repeats__', ...
+    num2str(result.block.repetitions),' direction-set repeats__', ...
     num2str(result.repetitions * ...
     (result.isipre + result.stimduration + result.isipost) / 60), ...
     ' min estimated Duration.'), ...
     60,50,[255 128 0]);
 
 Screen('DrawText',wininfo.w,strcat( ...
-    'Filename:',fnameLocal, ...
-    '    Hit any key to continue / q to abort.'), ...
+    'Turn the RED light ON. Filename:',fnameLocal, ...
+    '    Hit any key to start the main experiment / q to abort.'), ...
     60,70,[255 128 0]);
 
-draw_frame2ttl_patch(false);
 Screen('Flip',wininfo.w);
 
 FlushEvents;
-disp('Hit any key to continue / q to abort.');
+disp(['Turn the RED light ON, then hit any key to start the main ' ...
+    'experiment / q to abort.']);
 startKeyCode = wait_for_new_key(false);
 
 if startKeyCode(KbName('q')) || startKeyCode(KbName('Q'))
@@ -480,11 +477,7 @@ if startKeyCode(KbName('q')) || startKeyCode(KbName('Q'))
     return;
 end
 
-topPriorityLevel = MaxPriority(wininfo.w);
-Priority(topPriorityLevel);
-
 Screen('DrawTexture',wininfo.w,wininfo.BG);
-draw_frame2ttl_patch(false);
 Screen('Flip',wininfo.w);
 
 result.starttime = datestr(now);
@@ -508,6 +501,8 @@ try
 
         result.tr_num = result.tr_num + 1;
         activeTrialIndex = result.tr_num;
+        activeSessionType = "red";
+        activeGreenSessionIndex = 0;
         activeCallbackError = [];
         capture_clock_anchor( ...
             sprintf('block_%d_start',result.tr_num), ...
@@ -523,7 +518,7 @@ try
             result.sweeps_per_block,result.contrast_period);
 
         tifFile = fullfile(result.camera_save_folder, ...
-            sprintf('block%02d_%s.tif',result.tr_num, ...
+            sprintf('red_block%02d_%s.tif',result.tr_num, ...
             char(blockNames(istimNT))));
 
         if exist(tifFile,'file')
@@ -540,25 +535,6 @@ try
         result.camera.tifFile(result.tr_num) = string(tifFile);
 
         flushdata(vid);
-
-        if result.frame2ttl_bpod_recording
-            % Use one manager per block. Each block is an independent
-            % Bpod trial, so retaining a manager across the comparatively
-            % long block setup interval only produces a misleading
-            % inter-trial dead-time warning.
-            bpodTrialManager = BpodTrialManager;
-            bpodStateTimeout = plannedTrialDuration + ...
-                result.frame2ttl_bpod_timeout_padding_sec;
-            bpodStateMachine = NewStateMachine();
-            bpodStateMachine = AddState(bpodStateMachine, ...
-                'Name','Frame2TTLCapture', ...
-                'Timer',bpodStateTimeout, ...
-                'StateChangeConditions', ...
-                {'SoftCode1','>exit','Tup','>exit'}, ...
-                'OutputActions',{});
-            bpodTrialManager.startTrial(bpodStateMachine);
-            bpodTrialRunning = true;
-        end
 
         fprintf('\nTrial %04d camera start: %s\n', ...
             result.tr_num-1,tifFile);
@@ -642,10 +618,6 @@ try
         result.camera.actualFrameCount(result.tr_num) = ...
             vid.FramesAcquired;
 
-        if bpodTrialRunning
-            SendBpodSoftCode(1);
-        end
-
         % Write every frame still left in the acquisition buffer.
         drainTimer = tic;
         while vid.FramesAvailable > 0
@@ -675,18 +647,6 @@ try
 
         close(activeTiff);
         activeTiff = [];
-
-        if bpodTrialRunning
-            bpodRawEvents = bpodTrialManager.getTrialData();
-            bpodTrialRunning = false;
-            store_bpod_frame2ttl_events( ...
-                result.tr_num,bpodRawEvents);
-        end
-
-        if ~isempty(bpodTrialManager)
-            delete(bpodTrialManager);
-            bpodTrialManager = [];
-        end
 
         capture_clock_anchor( ...
             sprintf('block_%d_end',result.tr_num), ...
@@ -771,13 +731,8 @@ try
         result.camera.tifFile;
     CallbackError = ...
         result.camera.callbackError;
-    Frame2TTLExpectedEdges = repmat( ...
-        result.frame2ttl.expectedEdgesPerBlock,nTrials,1);
-    Frame2TTLEdgeCount = result.frame2ttl.edgeCount;
-    Frame2TTLMissingEdges = ...
-        Frame2TTLExpectedEdges-Frame2TTLEdgeCount;
     PTBMissedDisplayFrames = sum( ...
-        result.frame2ttl.ptbMissedDeadline_sec > 0,2);
+        result.displayTiming.ptbMissedDeadline_sec > 0,2);
 
     T = table(Trial,BlockCondition, ...
         PlannedRecordTime_sec,TargetFrameCount, ...
@@ -785,8 +740,7 @@ try
         ActualFPS,CameraStopLatency_sec, ...
         CameraTimestampCount,TimestampDerivedFPS, ...
         PreITI_sec,Stimulus_sec,PostITI_sec, ...
-        Frame2TTLExpectedEdges,Frame2TTLEdgeCount, ...
-        Frame2TTLMissingEdges,PTBMissedDisplayFrames, ...
+        PTBMissedDisplayFrames, ...
         TIFF_File,CallbackError);
 
     writetable(T,summaryFile);
@@ -824,6 +778,430 @@ end
 
 %%%%% ALL THE INNER FXNS %%%%%
 
+    function run_green_imaging_session(sessionIndex)
+        nGreenBlocks = numel(greenBlockNames);
+        greenStimDuration = ...
+            result.contrast_period * greenSweepsPerBlock;
+        greenPlannedTrialDuration = ...
+            result.isipre + greenStimDuration + result.isipost;
+        greenPlannedFrameCount = ...
+            round(greenPlannedTrialDuration * result.camera_fps);
+        greenBlockDurationFrames = ...
+            result.movieDurationFrames * greenSweepsPerBlock;
+
+        result.green.sessionCount = sessionIndex;
+        result.green.sessions(sessionIndex).sessionIndex = sessionIndex;
+        result.green.sessions(sessionIndex).starttime = datestr(now);
+        result.green.sessions(sessionIndex).endtime = '';
+        result.green.sessions(sessionIndex).completed = false;
+        result.green.sessions(sessionIndex).block.names = ...
+            greenBlockNames;
+        result.green.sessions(sessionIndex).block.axis = ...
+            greenBlockAxis;
+        result.green.sessions(sessionIndex).block.reverse = ...
+            logical(greenBlockReverse);
+        result.green.sessions(sessionIndex).block.firstStimFlip_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).block.lastStimFlip_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).block.sweepFirstFlip_sec = ...
+            nan(nGreenBlocks,greenSweepsPerBlock);
+        result.green.sessions(sessionIndex).block.sweepLastFlip_sec = ...
+            nan(nGreenBlocks,greenSweepsPerBlock);
+        result.green.sessions(sessionIndex).contrast = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).timestamp = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).displayTiming.ptbFlipTime_sec = ...
+            nan(nGreenBlocks,greenBlockDurationFrames);
+        result.green.sessions( ...
+            sessionIndex).displayTiming.ptbMissedDeadline_sec = ...
+            nan(nGreenBlocks,greenBlockDurationFrames);
+
+        result.green.sessions( ...
+            sessionIndex).camera.plannedTrialDuration_sec = ...
+            repmat(greenPlannedTrialDuration,nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.targetFrameCount = ...
+            repmat(greenPlannedFrameCount,nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.actualRecordTime_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.actualFrameCount = ...
+            zeros(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.tiffFrameCount = ...
+            zeros(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.actualFPS = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.stopLatency_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.preITI_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.stimulus_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.postITI_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.tifFile = ...
+            strings(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.callbackError = ...
+            strings(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.frameTime_sec = ...
+            cell(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.frameNumber = ...
+            cell(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.frameAbsTime = ...
+            cell(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.frameMetadata = ...
+            cell(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.chunkTimestamp = ...
+            cell(nGreenBlocks,1);
+        result.green.sessions( ...
+            sessionIndex).camera.frameTimestampCount = ...
+            zeros(nGreenBlocks,1);
+        result.green.sessions( ...
+            sessionIndex).camera.timestampDerivedFPS = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions(sessionIndex).camera.startGetSecs_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions( ...
+            sessionIndex).camera.stopRequestGetSecs_sec = ...
+            nan(nGreenBlocks,1);
+        result.green.sessions( ...
+            sessionIndex).camera.stopCompleteGetSecs_sec = ...
+            nan(nGreenBlocks,1);
+
+        greenSessionT0 = GetSecs;
+        result.green.sessions(sessionIndex).ptbT0GetSecs_sec = ...
+            greenSessionT0;
+        capture_clock_anchor( ...
+            sprintf('green_session_%d_start',sessionIndex),0);
+
+        fprintf(['\nGreen-light imaging session %d: %d blocks x ' ...
+            '%d sweeps x %.3f sec\n'], ...
+            sessionIndex,nGreenBlocks,greenSweepsPerBlock, ...
+            result.contrast_period);
+
+        for greenBlockIdx = 1:nGreenBlocks
+            if check_for_quit()
+                break;
+            end
+
+            activeSessionType = "green";
+            activeGreenSessionIndex = sessionIndex;
+            activeTrialIndex = greenBlockIdx;
+            activeCallbackError = [];
+            capture_clock_anchor(sprintf( ...
+                'green_session_%d_block_%d_start', ...
+                sessionIndex,greenBlockIdx),greenBlockIdx);
+
+            greenStim = result;
+            greenStim.tr_num = greenBlockIdx;
+            greenStim.sweeps_per_block = greenSweepsPerBlock;
+            greenStim.stimduration = greenStimDuration;
+            greenStim.blockDurationFrames = greenBlockDurationFrames;
+            greenStim.dirflag = greenBlockAxis(greenBlockIdx);
+            greenStim.reverseflag = ...
+                logical(greenBlockReverse(greenBlockIdx));
+            greenStim.moviedata = cell(nGreenBlocks,1);
+            greenStim.tex = [];
+            greenStim.contrasts_by_trial = nan(nGreenBlocks,1);
+            greenStim = get_movie_stim(greenStim);
+            result.green.sessions(sessionIndex).contrast( ...
+                greenBlockIdx) = greenStim.contrast;
+
+            fprintf(['\nGreen session %d, block %d/%d: %s, ' ...
+                '%d sweeps x %.3f sec\n'], ...
+                sessionIndex,greenBlockIdx,nGreenBlocks, ...
+                char(greenBlockNames(greenBlockIdx)), ...
+                greenSweepsPerBlock,result.contrast_period);
+
+            tifFile = fullfile(result.camera_save_folder, ...
+                sprintf('green_session%02d_block%02d_%s.tif', ...
+                sessionIndex,greenBlockIdx, ...
+                char(greenBlockNames(greenBlockIdx))));
+
+            if exist(tifFile,'file')
+                delete(tifFile);
+            end
+
+            activeTiffFrameCount = 0;
+            activeCameraFrameTime = zeros(0,1);
+            activeCameraFrameNumber = zeros(0,1);
+            activeCameraFrameAbsTime = zeros(0,6);
+            activeCameraFrameMetadata = struct([]);
+            activeCameraChunkTimestamp = cell(0,1);
+            activeTiff = Tiff(tifFile,'w8');
+            result.green.sessions(sessionIndex).camera.tifFile( ...
+                greenBlockIdx) = string(tifFile);
+
+            flushdata(vid);
+            fprintf('\nGreen block %02d camera start: %s\n', ...
+                greenBlockIdx,tifFile);
+
+            start(vid);
+            cameraStart = GetSecs;
+            result.green.sessions( ...
+                sessionIndex).camera.startGetSecs_sec( ...
+                greenBlockIdx) = cameraStart;
+
+            WaitSecs(result.isipre);
+            capture_clock_anchor(sprintf( ...
+                'green_session_%d_block_%d_pre_stimulus', ...
+                sessionIndex,greenBlockIdx),greenBlockIdx);
+            preEnd = GetSecs;
+            result.green.sessions(sessionIndex).camera.preITI_sec( ...
+                greenBlockIdx) = preEnd - cameraStart;
+
+            [firstStimFlip,lastStimFlip,flipTimes,missedDeadlines, ...
+                sweepFirstFlips,sweepLastFlips] = ...
+                display_green_grating(wininfo,greenStim);
+
+            if quitRequested
+                if isrunning(vid)
+                    stop(vid);
+                end
+
+                while vid.FramesAvailable > 0
+                    drain_camera_buffer_to_tiff(vid);
+                end
+
+                store_camera_frame_timestamps(greenBlockIdx);
+
+                if ~isempty(activeTiff)
+                    close(activeTiff);
+                    activeTiff = [];
+                end
+
+                capture_clock_anchor(sprintf( ...
+                    'green_session_%d_block_%d_aborted', ...
+                    sessionIndex,greenBlockIdx),greenBlockIdx);
+                save(fnameLocal,'result','-v7.3');
+                return;
+            end
+
+            capture_clock_anchor(sprintf( ...
+                'green_session_%d_block_%d_post_stimulus', ...
+                sessionIndex,greenBlockIdx),greenBlockIdx);
+
+            result.green.sessions(sessionIndex).timestamp( ...
+                greenBlockIdx) = firstStimFlip - greenSessionT0;
+            result.green.sessions( ...
+                sessionIndex).block.firstStimFlip_sec( ...
+                greenBlockIdx) = firstStimFlip - greenSessionT0;
+            result.green.sessions( ...
+                sessionIndex).block.lastStimFlip_sec( ...
+                greenBlockIdx) = lastStimFlip - greenSessionT0;
+            result.green.sessions( ...
+                sessionIndex).block.sweepFirstFlip_sec( ...
+                greenBlockIdx,:) = sweepFirstFlips - greenSessionT0;
+            result.green.sessions( ...
+                sessionIndex).block.sweepLastFlip_sec( ...
+                greenBlockIdx,:) = sweepLastFlips - greenSessionT0;
+            result.green.sessions( ...
+                sessionIndex).displayTiming.ptbFlipTime_sec( ...
+                greenBlockIdx,:) = flipTimes - greenSessionT0;
+            result.green.sessions( ...
+                sessionIndex).displayTiming.ptbMissedDeadline_sec( ...
+                greenBlockIdx,:) = missedDeadlines;
+            result.green.sessions(sessionIndex).camera.stimulus_sec( ...
+                greenBlockIdx) = lastStimFlip - firstStimFlip;
+
+            postStart = GetSecs;
+            WaitSecs(result.isipost);
+            postEnd = GetSecs;
+            result.green.sessions(sessionIndex).camera.postITI_sec( ...
+                greenBlockIdx) = postEnd - postStart;
+
+            cameraStopRequest = GetSecs;
+            result.green.sessions( ...
+                sessionIndex).camera.stopRequestGetSecs_sec( ...
+                greenBlockIdx) = cameraStopRequest;
+
+            if isrunning(vid)
+                stop(vid);
+            end
+
+            cameraStopComplete = GetSecs;
+            result.green.sessions( ...
+                sessionIndex).camera.stopCompleteGetSecs_sec( ...
+                greenBlockIdx) = cameraStopComplete;
+            result.green.sessions( ...
+                sessionIndex).camera.actualRecordTime_sec( ...
+                greenBlockIdx) = cameraStopRequest - cameraStart;
+            result.green.sessions(sessionIndex).camera.stopLatency_sec( ...
+                greenBlockIdx) = cameraStopComplete - cameraStopRequest;
+            result.green.sessions( ...
+                sessionIndex).camera.actualFrameCount( ...
+                greenBlockIdx) = vid.FramesAcquired;
+
+            drainTimer = tic;
+            while vid.FramesAvailable > 0
+                drain_camera_buffer_to_tiff(vid);
+
+                if toc(drainTimer) > ...
+                        result.camera_final_drain_timeout_sec
+                    error('Final green-session TIFF drain timed out.');
+                end
+            end
+
+            if ~isempty(activeCallbackError)
+                result.green.sessions( ...
+                    sessionIndex).camera.callbackError( ...
+                    greenBlockIdx) = ...
+                    string(activeCallbackError.message);
+                rethrow(activeCallbackError);
+            end
+
+            result.green.sessions( ...
+                sessionIndex).camera.tiffFrameCount( ...
+                greenBlockIdx) = activeTiffFrameCount;
+            store_camera_frame_timestamps(greenBlockIdx);
+
+            if result.green.sessions( ...
+                    sessionIndex).camera.actualRecordTime_sec( ...
+                    greenBlockIdx) > 0
+                result.green.sessions(sessionIndex).camera.actualFPS( ...
+                    greenBlockIdx) = ...
+                    result.green.sessions( ...
+                    sessionIndex).camera.actualFrameCount( ...
+                    greenBlockIdx) / ...
+                    result.green.sessions( ...
+                    sessionIndex).camera.actualRecordTime_sec( ...
+                    greenBlockIdx);
+            end
+
+            close(activeTiff);
+            activeTiff = [];
+
+            capture_clock_anchor(sprintf( ...
+                'green_session_%d_block_%d_end', ...
+                sessionIndex,greenBlockIdx),greenBlockIdx);
+
+            fprintf(['Green block recorded %.3f sec, camera ' ...
+                'frames=%d, TIFF frames=%d\n'], ...
+                result.green.sessions( ...
+                sessionIndex).camera.actualRecordTime_sec( ...
+                greenBlockIdx), ...
+                result.green.sessions( ...
+                sessionIndex).camera.actualFrameCount( ...
+                greenBlockIdx), ...
+                result.green.sessions( ...
+                sessionIndex).camera.tiffFrameCount( ...
+                greenBlockIdx));
+
+            if result.green.sessions( ...
+                    sessionIndex).camera.actualFrameCount( ...
+                    greenBlockIdx) ~= ...
+                    result.green.sessions( ...
+                    sessionIndex).camera.tiffFrameCount( ...
+                    greenBlockIdx)
+                warning(['Green session camera and TIFF frame ' ...
+                    'counts do not match.']);
+            end
+
+            if result.green.sessions( ...
+                    sessionIndex).camera.frameTimestampCount( ...
+                    greenBlockIdx) ~= ...
+                    result.green.sessions( ...
+                    sessionIndex).camera.tiffFrameCount( ...
+                    greenBlockIdx)
+                warning(['Green session timestamp and TIFF frame ' ...
+                    'counts do not match in block %d.'],greenBlockIdx);
+            end
+
+            save(fnameLocal,'result','-v7.3');
+
+            if result.save_remote
+                save(fnameRemote,'result','-v7.3');
+            end
+        end
+
+        if ~quitRequested
+            result.green.sessions(sessionIndex).completed = true;
+            result.green.sessions(sessionIndex).endtime = datestr(now);
+            capture_clock_anchor(sprintf( ...
+                'green_session_%d_end',sessionIndex),0);
+            save(fnameLocal,'result','-v7.3');
+
+            if result.save_remote
+                save(fnameRemote,'result','-v7.3');
+            end
+        end
+
+        activeSessionType = "none";
+        activeGreenSessionIndex = 0;
+        activeTrialIndex = 0;
+    end
+
+    function [firstFlip,lastFlip,flipTimes,missedDeadlines, ...
+            sweepFirstFlips,sweepLastFlips] = ...
+            display_green_grating(wininfoLocal,thisstim)
+
+        nSweeps = thisstim.sweeps_per_block;
+        nBlockFrames = thisstim.movieDurationFrames * nSweeps;
+        firstFlip = NaN;
+        lastFlip = NaN;
+        flipTimes = nan(1,nBlockFrames);
+        missedDeadlines = nan(1,nBlockFrames);
+        sweepFirstFlips = nan(1,nSweeps);
+        sweepLastFlips = nan(1,nSweeps);
+
+        for sweepIdx = 1:nSweeps
+            for itex = 1:thisstim.movieDurationFrames
+                if check_for_quit()
+                    break;
+                end
+
+                Screen('DrawTexture',wininfoLocal.w, ...
+                    thisstim.tex(itex),[], ...
+                    [0 0 wininfoLocal.xRes wininfoLocal.xRes]);
+
+                blockFrameIdx = ...
+                    (sweepIdx-1)*thisstim.movieDurationFrames + itex;
+
+                if isnan(lastFlip)
+                    [currentFlip,~,~,~] = ...
+                        Screen('Flip',wininfoLocal.w);
+                    missedDeadline = NaN;
+                else
+                    nextFlipDeadline = ...
+                        lastFlip + 0.5*wininfoLocal.ifi;
+                    [currentFlip,~,~,missedDeadline] = ...
+                        Screen('Flip',wininfoLocal.w, ...
+                        nextFlipDeadline);
+                end
+
+                flipTimes(blockFrameIdx) = currentFlip;
+                missedDeadlines(blockFrameIdx) = missedDeadline;
+
+                if itex == 1
+                    sweepFirstFlips(sweepIdx) = currentFlip;
+
+                    if isnan(firstFlip)
+                        firstFlip = currentFlip;
+                    end
+                end
+
+                sweepLastFlips(sweepIdx) = currentFlip;
+                lastFlip = currentFlip;
+            end
+
+            if quitRequested
+                break;
+            end
+        end
+
+        if quitRequested
+            if isfield(thisstim,'tex') && ~isempty(thisstim.tex)
+                Screen('Close',thisstim.tex(:));
+            end
+            return;
+        end
+
+        Screen('DrawTexture',wininfoLocal.w,wininfoLocal.BG);
+        Screen('Flip',wininfoLocal.w, ...
+            lastFlip + 0.5*wininfoLocal.ifi);
+        Screen('Close',thisstim.tex(:));
+    end
+
     function realtime_tiff_callback(callbackVid,~)
         if callbackIsWriting || isempty(activeTiff)
             return;
@@ -836,7 +1214,17 @@ end
         catch callbackME
             activeCallbackError = callbackME;
 
-            if activeTrialIndex >= 1 && activeTrialIndex <= nTrials
+            if activeSessionType == "green" && ...
+                    activeGreenSessionIndex >= 1 && ...
+                    activeGreenSessionIndex <= ...
+                    numel(result.green.sessions) && ...
+                    activeTrialIndex >= 1 && ...
+                    activeTrialIndex <= numel(greenBlockNames)
+                result.green.sessions( ...
+                    activeGreenSessionIndex).camera.callbackError( ...
+                    activeTrialIndex) = string(callbackME.message);
+            elseif activeSessionType == "red" && ...
+                    activeTrialIndex >= 1 && activeTrialIndex <= nTrials
                 result.camera.callbackError(activeTrialIndex) = ...
                     string(callbackME.message);
             end
@@ -927,26 +1315,62 @@ end
     end
 
     function store_camera_frame_timestamps(trialIndex)
-        if trialIndex < 1 || trialIndex > nTrials
-            return;
-        end
+        if activeSessionType == "green"
+            if activeGreenSessionIndex < 1 || ...
+                    activeGreenSessionIndex > ...
+                    numel(result.green.sessions) || ...
+                    trialIndex < 1 || ...
+                    trialIndex > numel(greenBlockNames)
+                return;
+            end
 
-        result.camera.frameTime_sec{trialIndex} = ...
-            activeCameraFrameTime;
-        result.camera.frameNumber{trialIndex} = ...
-            activeCameraFrameNumber;
-        result.camera.frameAbsTime{trialIndex} = ...
-            activeCameraFrameAbsTime;
-        result.camera.frameMetadata{trialIndex} = ...
-            activeCameraFrameMetadata;
-        result.camera.chunkTimestamp{trialIndex} = ...
-            activeCameraChunkTimestamp;
-        result.camera.frameTimestampCount(trialIndex) = ...
-            numel(activeCameraFrameTime);
+            result.green.sessions( ...
+                activeGreenSessionIndex).camera.frameTime_sec{ ...
+                trialIndex} = activeCameraFrameTime;
+            result.green.sessions( ...
+                activeGreenSessionIndex).camera.frameNumber{ ...
+                trialIndex} = activeCameraFrameNumber;
+            result.green.sessions( ...
+                activeGreenSessionIndex).camera.frameAbsTime{ ...
+                trialIndex} = activeCameraFrameAbsTime;
+            result.green.sessions( ...
+                activeGreenSessionIndex).camera.frameMetadata{ ...
+                trialIndex} = activeCameraFrameMetadata;
+            result.green.sessions( ...
+                activeGreenSessionIndex).camera.chunkTimestamp{ ...
+                trialIndex} = activeCameraChunkTimestamp;
+            result.green.sessions( ...
+                activeGreenSessionIndex).camera.frameTimestampCount( ...
+                trialIndex) = numel(activeCameraFrameTime);
 
-        if numel(activeCameraFrameTime) >= 2
-            result.camera.timestampDerivedFPS(trialIndex) = ...
-                1/median(diff(activeCameraFrameTime));
+            if numel(activeCameraFrameTime) >= 2
+                result.green.sessions( ...
+                    activeGreenSessionIndex).camera.timestampDerivedFPS( ...
+                    trialIndex) = ...
+                    1/median(diff(activeCameraFrameTime));
+            end
+        else
+            if trialIndex < 1 || trialIndex > nTrials
+                return;
+            end
+
+            result.camera.frameTime_sec{trialIndex} = ...
+                activeCameraFrameTime;
+            result.camera.frameNumber{trialIndex} = ...
+                activeCameraFrameNumber;
+            result.camera.frameAbsTime{trialIndex} = ...
+                activeCameraFrameAbsTime;
+            result.camera.frameMetadata{trialIndex} = ...
+                activeCameraFrameMetadata;
+            result.camera.chunkTimestamp{trialIndex} = ...
+                activeCameraChunkTimestamp;
+            result.camera.frameTimestampCount(trialIndex) = ...
+                numel(activeCameraFrameTime);
+
+            if numel(activeCameraFrameTime) >= 2
+                result.camera.timestampDerivedFPS(trialIndex) = ...
+                    1/median(diff(activeCameraFrameTime));
+            end
         end
     end
 
@@ -1085,7 +1509,7 @@ end
         tagStruct.RowsPerStrip = min(64,size(oneFrame,1));
         tagStruct.Orientation = Tiff.Orientation.TopLeft;
         tagStruct.Software = ...
-            'MATLAB run_cmnoise_uday_notrigger_hs';
+            'MATLAB run_cmnoise_no_frame2ttl_bpod';
     end
 
     function [firstFlip,lastFlip] = ...
@@ -1110,8 +1534,6 @@ end
 
                 blockFrameIdx = ...
                     (sweepIdx-1)*thisstim.movieDurationFrames + itex;
-                patchIsBright = mod(blockFrameIdx,2) == 1;
-                draw_frame2ttl_patch(patchIsBright);
 
                 if isnan(lastFlip)
                     % The first frame has no preceding stimulus VBL from
@@ -1130,9 +1552,9 @@ end
                         Screen('Flip',wininfoLocal.w, ...
                         nextFlipDeadline);
                 end
-                result.frame2ttl.ptbFlipTime_sec( ...
+                result.displayTiming.ptbFlipTime_sec( ...
                     result.tr_num,blockFrameIdx) = currentFlip - t0;
-                result.frame2ttl.ptbMissedDeadline_sec( ...
+                result.displayTiming.ptbMissedDeadline_sec( ...
                     result.tr_num,blockFrameIdx) = missedDeadline;
 
                 if itex == 1
@@ -1170,59 +1592,26 @@ end
         end
 
         Screen('DrawTexture',wininfoLocal.w,wininfoLocal.BG);
-        draw_frame2ttl_patch(false);
         Screen('Flip',wininfoLocal.w, ...
             lastFlip + 0.5*wininfoLocal.ifi);
 
         Screen('Close',thisstim.tex(:));
     end
 
-    function draw_frame2ttl_patch(isBright)
-        if ~result.frame2ttl_enabled || isempty(frame2ttlPatchRect)
-            return;
-        end
+    function choice = wait_for_choice(validKeyNames,processGuiEvents)
+        choice = '';
 
-        Screen('FillRect',wininfo.w,0,frame2ttlPatchRect);
+        while isempty(choice)
+            keyCode = wait_for_new_key(processGuiEvents);
 
-        if isBright
-            Screen('FillRect',wininfo.w, ...
-                result.frame2ttl_patch_intensity, ...
-                frame2ttlActiveRect);
-        end
-    end
+            for keyIdx = 1:numel(validKeyNames)
+                keyName = validKeyNames{keyIdx};
 
-    function store_bpod_frame2ttl_events(trialIndex,rawEvents)
-        eventNames = ...
-            BpodSystem.StateMachineInfo.EventNames(rawEvents.Events);
-        isHigh = strcmp(eventNames,bpodHighEventName);
-        isLow = strcmp(eventNames,bpodLowEventName);
-        isFrame2TTL = isHigh | isLow;
-
-        edgeTimes = rawEvents.EventTimestamps(isFrame2TTL);
-        edgePolarity = zeros(size(edgeTimes));
-        edgePolarity(isHigh(isFrame2TTL)) = 1;
-        edgePolarity(isLow(isFrame2TTL)) = -1;
-
-        [edgeTimes,sortOrder] = sort(edgeTimes);
-        edgePolarity = edgePolarity(sortOrder);
-
-        result.frame2ttl.bpodRawEvents{trialIndex} = rawEvents;
-        result.frame2ttl.bpodEdgeTime_sec{trialIndex} = edgeTimes;
-        result.frame2ttl.bpodEdgeSessionTime_sec{trialIndex} = ...
-            rawEvents.TrialStartTimestamp + edgeTimes;
-        result.frame2ttl.bpodEdgePolarity{trialIndex} = edgePolarity;
-        result.frame2ttl.edgeCount(trialIndex) = numel(edgeTimes);
-        result.frame2ttl.bpodTrialStartTimestamp_sec(trialIndex) = ...
-            rawEvents.TrialStartTimestamp;
-        result.frame2ttl.bpodTrialEndTimestamp_sec(trialIndex) = ...
-            rawEvents.TrialEndTimestamp;
-
-        expectedEdges = result.frame2ttl.expectedEdgesPerBlock;
-
-        if numel(edgeTimes) ~= expectedEdges
-            warning(['Frame2TTL edge count mismatch in block %d: ' ...
-                'expected %d, recorded %d.'], ...
-                trialIndex,expectedEdges,numel(edgeTimes));
+                if keyCode(KbName(keyName))
+                    choice = keyName;
+                    return;
+                end
+            end
         end
     end
 
@@ -1274,35 +1663,6 @@ end
     end
 
     function cleanup_resources()
-        if bpodTrialRunning
-            try
-                SendBpodSoftCode(1);
-                bpodRawEvents = bpodTrialManager.getTrialData();
-                bpodTrialRunning = false;
-
-                if activeTrialIndex >= 1 && ...
-                        activeTrialIndex <= nTrials
-                    store_bpod_frame2ttl_events( ...
-                        activeTrialIndex,bpodRawEvents);
-                end
-            catch ME
-                warning('Bpod Frame2TTL cleanup failed: %s',ME.message);
-                bpodTrialRunning = false;
-            end
-        end
-
-        if ~isempty(bpodTrialManager)
-            try
-                % Let the class destructor own its timer cleanup. Manually
-                % deleting the timer here makes the destructor delete the
-                % same timer twice.
-                delete(bpodTrialManager);
-            catch ME
-                warning('BpodTrialManager cleanup failed: %s',ME.message);
-            end
-            bpodTrialManager = [];
-        end
-
         try
             Priority(0);
         catch
@@ -1342,7 +1702,7 @@ end
             catch
             end
 
-            if activeTrialIndex >= 1 && activeTrialIndex <= nTrials
+            if activeTrialIndex >= 1
                 store_camera_frame_timestamps(activeTrialIndex);
             end
 
