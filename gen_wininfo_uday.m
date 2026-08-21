@@ -4,8 +4,18 @@ function wininfo = gen_wininfo_uday(result)
 % xRes = 1280; % Dell 170S monitors
 % yRes = 1024;
 Bcol = 128;
-screenNumber = max(Screen('Screens'));
-% screenNumber = 1;
+availableScreens = Screen('Screens');
+if isfield(result,'screenNumber')
+    screenNumber = result.screenNumber;
+    validateattributes(screenNumber,{'numeric'}, {'scalar','integer'});
+    if ~ismember(screenNumber,availableScreens)
+        error(['Requested Psychtoolbox screenNumber %d is not available. ' ...
+            'Available screen numbers: %s.'],screenNumber, ...
+            mat2str(availableScreens));
+    end
+else
+    screenNumber = max(availableScreens);
+end
 blI = BlackIndex(screenNumber);
 whI = WhiteIndex(screenNumber);
 
@@ -38,17 +48,27 @@ fitSize = [xRes,yRes];
 %
 AssertOpenGL; % Psychtoolbox function
 
+Screen('Preference', 'VBLTimestampingMode', -1);
+
+if isfield(result,'skipsynctests')
+    validateattributes(result.skipsynctests,{'numeric','logical'}, ...
+        {'scalar'});
+    wininfo.skipSync = double(logical(result.skipsynctests));
+else
+    wininfo.skipSync = 0;
+end
+
+if wininfo.skipSync
+    warning(['Psychtoolbox synchronization tests are disabled. ' ...
+        'Stimulus timing must be independently verified before ' ...
+        'using these data for timing-critical conclusions.']);
+end
+
+Screen('Preference','SkipSyncTests',wininfo.skipSync);
+
 PsychImaging('PrepareConfiguration');
 
 PsychImaging('AddTask', 'General', 'UsePanelFitter', fitSize, 'Aspect');
-
-Screen('Preference', 'VBLTimestampingMode', -1);
-wininfo.skipSync = 0;
-if wininfo.skipSync == 1
-    disp('HEY BIG WARNING SINK OFF')
-end
-Screen('Preference','SkipSyncTests', wininfo.skipSync);
-% Screen('Preference','SkipSyncTests', 0);
 
 % Center small framebuffer inside big framebuffer. Scale it up to
 % maximum size while preserving aspect ration of the original

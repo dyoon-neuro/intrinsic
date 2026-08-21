@@ -28,18 +28,22 @@ end
 
 cmod=1; cmodrnd = 1.5; step=2; bar = 3; oscbar = 3.5; Xpatches=4; Ypatches=5; %%%% movietypes
 
-imsize = 102;                %% size in pixels
-ximsize = wininfo.xRes;
-yimsize = wininfo.yRes;
+imsize = 102;                %% horizontal source size in pixels
 framerate = wininfo.frameRate;             %% Hz
-imageMag = result.image_mag;                 %% magnification that movie will be played at
 %%%contrastSigma =0.5;   %0.5      %% one-sigma value for contrast
 contrastSigma = result.contrast;
 %disp(['contrast used: ', num2str(result.contrast)])
 %% derived parameters
 
-degperpix = (1/wininfo.PixperDeg)*imageMag;
-nframes = round(framerate*duration);
+% The texture is stretched to the complete logical framebuffer.  Define
+% its sampling in visual degrees directly instead of relying on the legacy
+% imageMag=10 value (which was inconsistent with the 640-pixel framebuffer
+% used in the 20260811_7 acquisition).
+degperpix = wininfo.XDeg/imsize;
+yimsize = max(2,round(wininfo.YDeg/degperpix));
+% The legacy conjugate-symmetry indexing below is centered on nframes/2
+% and therefore requires an even temporal dimension.
+nframes = max(2,2*round(framerate*duration/2));
 
 %% frequency intervals for FFT
 nyq_pix = 0.5;
@@ -104,7 +108,25 @@ immax = std(imraw(:))/contrastSigma;
 immin = -1*immax;
 imscaled = (imraw - immin-immean) / (immax - immin);
 clear imfiltered;
-contrast_period =result.contrast_period;
+
+% Use a rectangular source image with approximately equal visual degrees
+% per source pixel in x and y.  Cropping the isotropic noise field avoids
+% introducing a second interpolation before Psychtoolbox draws it.
+if yimsize < imsize
+    firstRow = floor((imsize-yimsize)/2)+1;
+    imscaled = imscaled(firstRow:firstRow+yimsize-1,:,:);
+elseif yimsize > imsize
+    error(['The vertical visual span exceeds the horizontal span. ' ...
+        'Rectangular noise generation must be extended for this display.']);
+end
+
+contrast_period = result.contrast_period;
+
+if isfield(result,'current_period_sec') && ...
+        isfinite(result.current_period_sec) && ...
+        result.current_period_sec > 0
+    contrast_period = result.current_period_sec;
+end
 rcontrwin = result.rcontrast_window;
 
 
@@ -125,25 +147,36 @@ if movtype==bar
 end
 
 if movtype==oscbar
-    sweepFrames = round(contrast_period*framerate);
+    sweepFrames = nframes;
     dirflag = result.dirflag;
 
     if ~dirflag
         % Vertical aperture moving horizontally.
-        pixelsPerDeg = wininfo.XPixperDeg/imageMag;
+        axisPixels = imsize;
+        axisSpanDeg = wininfo.XDeg;
+        pixelsPerDeg = axisPixels/axisSpanDeg;
         oscbarPix = max(1,round( ...
             result.aperture_width_deg*pixelsPerDeg));
-        center = linspace(0-oscbarPix/2, ...
-            imsize+oscbarPix/2,sweepFrames);
+        trajectorySpanDeg = ...
+            axisSpanDeg + result.aperture_width_deg;
     else
         % Horizontal aperture moving vertically.
-        pixelsPerDeg = wininfo.YPixperDeg/imageMag;
+        axisPixels = yimsize;
+        axisSpanDeg = wininfo.YDeg;
+        pixelsPerDeg = axisPixels/axisSpanDeg;
         oscbarPix = max(1,round( ...
             result.aperture_width_deg*pixelsPerDeg));
-        scalef = wininfo.screenHeightcm/wininfo.screenWidthcm;
-        center = linspace(0-oscbarPix/2, ...
-            scalef*imsize+oscbarPix/2,sweepFrames);
+
+        trajectorySpanDeg = axisSpanDeg + result.aperture_width_deg;
     end
+
+    % Move from just outside one edge to just outside the opposite edge.
+    % Axis-specific periods, rather than extra off-screen travel, provide
+    % equal azimuth/elevation angular speed on a landscape display.
+    trajectoryStartDeg = (axisSpanDeg-trajectorySpanDeg)/2;
+    trajectoryEndDeg = axisSpanDeg-trajectoryStartDeg;
+    center = linspace(trajectoryStartDeg*pixelsPerDeg, ...
+        trajectoryEndDeg*pixelsPerDeg,sweepFrames);
 
     if result.reverseflag
         center = fliplr(center);
@@ -151,8 +184,8 @@ if movtype==oscbar
 
     loweredge = round(center-oscbarPix/2);
     upperedge = round(center+oscbarPix/2);
-    loweredge = max(1,min(imsize,loweredge));
-    upperedge = max(1,min(imsize,upperedge));
+    loweredge = max(1,min(axisPixels,loweredge));
+    upperedge = max(1,min(axisPixels,upperedge));
 end
 
 for f = 1:nframes
@@ -175,9 +208,11 @@ for f = 1:nframes
         ue = upperedge(sweepIndex);
         
         if(dirflag)
-            imscaled(1:le,:,f)=0.5; imscaled(ue:imsize,:,f)=0.5;
+            imscaled(1:le,:,f)=0.5;
+            imscaled(ue:yimsize,:,f)=0.5;
         else
-            imscaled(:,1:le,f)=0.5; imscaled(:,ue:imsize,f)=0.5;
+            imscaled(:,1:le,f)=0.5;
+            imscaled(:,ue:imsize,f)=0.5;
         end
     elseif movtype==Xpatches | movtype==Ypatches
         if movtype==Xpatches
@@ -224,5 +259,5 @@ imscaled = imscaled+0.5;
 end
 
 
-moviedata = uint8(floor(imscaled(1:imsize,1:imsize,:)*255)+1);
+moviedata = uint8(floor(imscaled*255)+1);
 

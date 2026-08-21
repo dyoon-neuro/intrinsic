@@ -1,6 +1,6 @@
-function result = run_cmnoise_no_frame2ttl_bpod(varargin)
+function result = run_cmnoise_green_red(varargin)
 
-%RUN_CMNOISE_NO_FRAME2TTL_BPOD Run the stimulus and camera standalone.
+%RUN_CMNOISE_GREEN_RED Run green-light and red-light imaging sessions.
 %   This version does not draw a Frame2TTL patch and does not initialize,
 %   control, or read a Bpod state machine. Camera acquisition is started
 %   directly from MATLAB and display timing is measured with Psychtoolbox.
@@ -8,16 +8,17 @@ function result = run_cmnoise_no_frame2ttl_bpod(varargin)
 p = inputParser;
 p.addParameter('rig',0);
 p.addParameter('skipsynctests',1);
-p.addParameter('animalid','fake');
+p.addParameter('animalid','int03');
 p.addParameter('depth','000');
 p.addParameter('repetitions',5);
 p.addParameter('stimduration',180);
-p.addParameter('isipre',3);
+p.addParameter('isipre',5); % Per-block gray baseline used by analysis.
 p.addParameter('isipost',3);
 p.addParameter('DScreen',8);
 p.addParameter('VertScreenSize',15);
 p.addParameter('HorzScreenSize',20);
 p.addParameter('fullscreen',1);
+p.addParameter('screenNumber',2); % Psychtoolbox display index for stimulus output.
 p.addParameter('sFreqs',0.04);
 p.addParameter('tFreqs',1);
 p.addParameter('contrast_list',[1]);
@@ -26,21 +27,29 @@ p.addParameter('save_remote',0);
 p.addParameter('interleave',0);
 p.addParameter('random_mov',1);
 p.addParameter('movtype',3.5);
-p.addParameter('aperture_width_deg',20);
+p.addParameter('aperture_width_deg',12);
 p.addParameter('contrast_period',18);
+p.addParameter('match_elevation_speed',true);
+p.addParameter('counterbalance_block_order',true);
 p.addParameter('sweeps_per_block',10);
+p.addParameter('green_repetitions',1);
+p.addParameter('green_sweeps_per_block',5);
 p.addParameter('rcontrast_window',120);
 p.addParameter('stimFolderRemote', ...
     'Z:\YeerimKim\mesorig\VisStimData\');
 
 %% -------------------- Camera parameters --------------------
 p.addParameter('camera_device_id',1);
+p.addParameter('camera_video_format','');
 p.addParameter('camera_fps',10);
-p.addParameter('camera_exposure_us',30000);
+p.addParameter('camera_exposure_us',100000);
 p.addParameter('camera_gain',18);
+p.addParameter('camera_red_exposure_us',[]);
+p.addParameter('camera_red_gain',[]);
 p.addParameter('camera_black_level',0);
 p.addParameter('camera_preview',1);
 p.addParameter('camera_preview_during_experiment',0);
+p.addParameter('red_setup_preview',1);
 p.addParameter('camera_save_folder','D:\intrinsic');
 p.addParameter('camera_tiff_chunk_frames',30);
 p.addParameter('camera_final_drain_timeout_sec',120);
@@ -65,14 +74,52 @@ blockRepetitions = result.repetitions;
 validateattributes(blockRepetitions,{'numeric'}, ...
     {'scalar','integer','positive'});
 
-blockNames = repmat(baseBlockNames,blockRepetitions,1) + "_" + ...
-    string(repelem((1:blockRepetitions)',numel(baseBlockNames)));
-blockAxis = repmat(baseBlockAxis,blockRepetitions,1);
-blockReverse = repmat(baseBlockReverse,blockRepetitions,1);
-greenBlockNames = baseBlockNames + "_1";
-greenBlockAxis = baseBlockAxis;
-greenBlockReverse = baseBlockReverse;
-greenSweepsPerBlock = 5;
+blockNames = strings(numel(baseBlockNames)*blockRepetitions,1);
+blockAxis = zeros(size(blockNames));
+blockReverse = zeros(size(blockNames));
+
+for repetitionIndex = 1:blockRepetitions
+    if logical(result.counterbalance_block_order) && ...
+            mod(repetitionIndex,2) == 0
+        directionOrder = numel(baseBlockNames):-1:1;
+    else
+        directionOrder = 1:numel(baseBlockNames);
+    end
+
+    destinationIndices = (repetitionIndex-1)*numel(baseBlockNames) + ...
+        (1:numel(baseBlockNames));
+    blockNames(destinationIndices) = ...
+        baseBlockNames(directionOrder) + "_" + string(repetitionIndex);
+    blockAxis(destinationIndices) = baseBlockAxis(directionOrder);
+    blockReverse(destinationIndices) = baseBlockReverse(directionOrder);
+end
+greenBlockRepetitions = result.green_repetitions;
+validateattributes(greenBlockRepetitions,{'numeric'}, ...
+    {'scalar','integer','positive'});
+
+greenBlockNames = strings( ...
+    numel(baseBlockNames)*greenBlockRepetitions,1);
+greenBlockAxis = zeros(size(greenBlockNames));
+greenBlockReverse = zeros(size(greenBlockNames));
+
+for repetitionIndex = 1:greenBlockRepetitions
+    if logical(result.counterbalance_block_order) && ...
+            mod(repetitionIndex,2) == 0
+        directionOrder = numel(baseBlockNames):-1:1;
+    else
+        directionOrder = 1:numel(baseBlockNames);
+    end
+
+    destinationIndices = ...
+        (repetitionIndex-1)*numel(baseBlockNames) + ...
+        (1:numel(baseBlockNames));
+    greenBlockNames(destinationIndices) = ...
+        baseBlockNames(directionOrder) + "_" + string(repetitionIndex);
+    greenBlockAxis(destinationIndices) = baseBlockAxis(directionOrder);
+    greenBlockReverse(destinationIndices) = ...
+        baseBlockReverse(directionOrder);
+end
+greenSweepsPerBlock = result.green_sweeps_per_block;
 
 result.repetitions = numel(blockNames);
 result.stimduration = ...
@@ -81,12 +128,16 @@ result.interleave = 0;
 result.block.names = blockNames;
 result.block.axis = blockAxis;
 result.block.reverse = logical(blockReverse);
+result.block.period_sec = repmat(result.contrast_period, ...
+    numel(blockNames),1);
 result.block.repetitions = blockRepetitions;
-result.green.repetitions_per_session = 1;
+result.green.repetitions_per_session = greenBlockRepetitions;
 result.green.sweeps_per_block = greenSweepsPerBlock;
 result.green.block.names = greenBlockNames;
 result.green.block.axis = greenBlockAxis;
 result.green.block.reverse = logical(greenBlockReverse);
+result.green.block.period_sec = repmat(result.contrast_period, ...
+    numel(greenBlockNames),1);
 result.green.sessionCount = 0;
 result.green.sessions = struct([]);
 
@@ -113,11 +164,35 @@ validateattributes(result.camera_tiff_chunk_frames,{'numeric'}, ...
     {'scalar','integer','positive'});
 validateattributes(result.camera_final_drain_timeout_sec,{'numeric'}, ...
     {'scalar','positive'});
+validateattributes(result.counterbalance_block_order, ...
+    {'numeric','logical'},{'scalar'});
+result.counterbalance_block_order = ...
+    logical(result.counterbalance_block_order);
+validateattributes(result.red_setup_preview, ...
+    {'numeric','logical'},{'scalar'});
+result.red_setup_preview = logical(result.red_setup_preview);
+
+if ~isempty(result.camera_red_exposure_us)
+    validateattributes(result.camera_red_exposure_us,{'numeric'}, ...
+        {'scalar','positive'});
+end
+
+if ~isempty(result.camera_red_gain)
+    validateattributes(result.camera_red_gain,{'numeric'}, ...
+        {'scalar','finite'});
+end
 validateattributes(result.aperture_width_deg,{'numeric'}, ...
     {'scalar','positive'});
 validateattributes(result.contrast_period,{'numeric'}, ...
     {'scalar','positive'});
+validateattributes(result.match_elevation_speed,{'numeric','logical'}, ...
+    {'scalar'});
+result.match_elevation_speed = logical(result.match_elevation_speed);
+validateattributes(result.camera_video_format,{'char','string'}, ...
+    {'scalartext'});
 validateattributes(result.sweeps_per_block,{'numeric'}, ...
+    {'scalar','integer','positive'});
+validateattributes(result.green_sweeps_per_block,{'numeric'}, ...
     {'scalar','integer','positive'});
 if result.repetitions < numel(result.contrast_list)
     warning(['The trial number (repetitions) is less than the number ' ...
@@ -245,8 +320,23 @@ quitRequested = false;
 
 imaqreset;
 
-vid = videoinput('gentl',result.camera_device_id);
+if strlength(string(result.camera_video_format)) == 0
+    vid = videoinput('gentl',result.camera_device_id);
+else
+    vid = videoinput('gentl',result.camera_device_id, ...
+        char(string(result.camera_video_format)));
+end
+
 src = getselectedsource(vid);
+result.camera.videoFormat = string(vid.VideoFormat);
+fprintf('Camera video format: %s\n',char(result.camera.videoFormat));
+
+if contains(lower(result.camera.videoFormat),"mono8")
+    warning(['Camera is acquiring Mono8. Low-amplitude red intrinsic ' ...
+        'responses can be below one digital count per frame; use ' ...
+        'camera_video_format to select an unpacked 12/16-bit ' ...
+        'monochrome mode if supported.']);
+end
 
 triggerconfig(vid,'immediate');
 
@@ -346,7 +436,13 @@ if result.camera_preview
 end
 
 %% -------------------- Psychtoolbox initialization --------------------
-wininfo = gen_wininfo_uday(result);
+try
+    wininfo = gen_wininfo_uday(result);
+catch ME
+    cleanup_resources();
+    rethrow(ME);
+end
+
 assignin('base','wininfo',wininfo);
 
 result.image_mag = 10;
@@ -354,11 +450,84 @@ result.dispInfo.xRes = wininfo.xRes;
 result.dispInfo.yRes = wininfo.yRes;
 result.dispInfo.DScreen = result.DScreen;
 result.dispInfo.VertScreenSize = result.VertScreenSize;
+result.dispInfo.XDeg = wininfo.XDeg;
+result.dispInfo.YDeg = wininfo.YDeg;
+
+% The stimulus texture fills the logical framebuffer.  The earlier square
+% destination rectangle used xRes for both axes; in this setup that drew a
+% 640-by-640 texture into a 640-by-400 framebuffer and clipped 37.5% of the
+% vertical trajectory.  Store the corrected geometry so the analysis can
+% convert phase using the trajectory actually shown.
+result.stimulus.destinationRect_pix = ...
+    [0 0 wininfo.xRes wininfo.yRes];
+result.stimulus.azimuthSpan_deg = wininfo.XDeg;
+result.stimulus.elevationSpan_deg = wininfo.YDeg;
+result.stimulus.matchElevationSpeed = result.match_elevation_speed;
+result.stimulus.azimuthTrajectorySpan_deg = ...
+    wininfo.XDeg + result.aperture_width_deg;
+result.stimulus.elevationTrajectorySpan_deg = ...
+    wininfo.YDeg + result.aperture_width_deg;
+result.stimulus.azimuthPeriod_sec = result.contrast_period;
+
+if result.match_elevation_speed
+    % Match angular speed by shortening the elevation period. Extending the
+    % vertical trajectory instead leaves the aperture completely off-screen
+    % for part of every cycle on a landscape display.
+    result.stimulus.elevationPeriod_sec = ...
+        result.stimulus.elevationTrajectorySpan_deg / ...
+        (result.stimulus.azimuthTrajectorySpan_deg / ...
+        result.stimulus.azimuthPeriod_sec);
+else
+    result.stimulus.elevationPeriod_sec = result.contrast_period;
+end
+
+% The frequency-domain noise generator requires an even number of temporal
+% samples. Quantize both periods to an even number of display frames and
+% store the actual period that will be presented and analyzed.
+result.stimulus.azimuthFramesPerSweep = max(2,2*round( ...
+    result.stimulus.azimuthPeriod_sec*wininfo.frameRate/2));
+result.stimulus.elevationFramesPerSweep = max(2,2*round( ...
+    result.stimulus.elevationPeriod_sec*wininfo.frameRate/2));
+result.stimulus.azimuthPeriod_sec = ...
+    result.stimulus.azimuthFramesPerSweep/wininfo.frameRate;
+result.stimulus.elevationPeriod_sec = ...
+    result.stimulus.elevationFramesPerSweep/wininfo.frameRate;
+
+result.block.period_sec = result.stimulus.azimuthPeriod_sec + ...
+    blockAxis .* (result.stimulus.elevationPeriod_sec - ...
+    result.stimulus.azimuthPeriod_sec);
+result.green.block.period_sec = ...
+    result.stimulus.azimuthPeriod_sec + greenBlockAxis .* ...
+    (result.stimulus.elevationPeriod_sec - ...
+    result.stimulus.azimuthPeriod_sec);
+
+result.stimulus.azimuthSweepSpeed_deg_per_sec = ...
+    result.stimulus.azimuthTrajectorySpan_deg / ...
+    result.stimulus.azimuthPeriod_sec;
+result.stimulus.elevationSweepSpeed_deg_per_sec = ...
+    result.stimulus.elevationTrajectorySpan_deg / ...
+    result.stimulus.elevationPeriod_sec;
+
+fprintf(['Stimulus geometry: %.2f x %.2f deg, %.2f-deg aperture; ' ...
+    'azimuth %.3f deg/s (%.3f sec), ' ...
+    'elevation %.3f deg/s (%.3f sec).\n'], ...
+    wininfo.XDeg,wininfo.YDeg,result.aperture_width_deg, ...
+    result.stimulus.azimuthSweepSpeed_deg_per_sec, ...
+    result.stimulus.azimuthPeriod_sec, ...
+    result.stimulus.elevationSweepSpeed_deg_per_sec, ...
+    result.stimulus.elevationPeriod_sec);
 
 result.movieDurationFrames = ...
-    round(result.contrast_period * wininfo.frameRate);
+    round(max(result.block.period_sec) * wininfo.frameRate);
 result.blockDurationFrames = ...
     result.movieDurationFrames * result.sweeps_per_block;
+
+blockStimulusDuration_sec = ...
+    result.block.period_sec * result.sweeps_per_block;
+result.camera.plannedTrialDuration_sec = result.isipre + ...
+    blockStimulusDuration_sec + result.isipost;
+result.camera.targetFrameCount = round( ...
+    result.camera.plannedTrialDuration_sec * result.camera_fps);
 
 result.displayTiming.ptbFlipTime_sec = ...
     nan(nTrials,result.blockDurationFrames);
@@ -395,8 +564,9 @@ try
             break;
         end
 
-        activeGreenSessionIndex = result.green.sessionCount + 1;
-        run_green_imaging_session(activeGreenSessionIndex);
+        greenSessionIndex = result.green.sessionCount + 1;
+        activeGreenSessionIndex = greenSessionIndex;
+        run_green_imaging_session(greenSessionIndex);
 
         if quitRequested
             break;
@@ -451,25 +621,122 @@ if quitRequested
 end
 
 %% -------------------- Red-light main experiment --------------------
+if ~isempty(result.camera_red_exposure_us)
+    try
+        src.ExposureTime = result.camera_red_exposure_us;
+    catch ME
+        warning('Red exposure setting failed: %s',ME.message);
+    end
+end
+
+if ~isempty(result.camera_red_gain)
+    try
+        src.Gain = result.camera_red_gain;
+    catch ME
+        warning('Red gain setting failed: %s',ME.message);
+    end
+end
+
+result.redSetup.requestedExposure_us = result.camera_red_exposure_us;
+result.redSetup.requestedGain = result.camera_red_gain;
+result.redSetup.previewIntensity = struct();
+
 Screen('FillRect',wininfo.w,[128,128,128]);
 Screen('DrawText',wininfo.w,strcat( ...
     num2str(result.block.repetitions),' direction-set repeats__', ...
-    num2str(result.repetitions * ...
-    (result.isipre + result.stimduration + result.isipost) / 60), ...
+    num2str(sum(result.camera.plannedTrialDuration_sec) / 60), ...
     ' min estimated Duration.'), ...
     60,50,[255 128 0]);
 
 Screen('DrawText',wininfo.w,strcat( ...
-    'Turn the RED light ON. Filename:',fnameLocal, ...
-    '    Hit any key to start the main experiment / q to abort.'), ...
+    'RED >610 nm + correct filter; refocus 100-500 um below vessels. ', ...
+    'Filename:',fnameLocal), ...
     60,70,[255 128 0]);
+
+Screen('DrawText',wininfo.w, ...
+    'Adjust red intensity in preview, then hit any key / q to abort.', ...
+    60,90,[255 128 0]);
 
 Screen('Flip',wininfo.w);
 
 FlushEvents;
-disp(['Turn the RED light ON, then hit any key to start the main ' ...
-    'experiment / q to abort.']);
+disp(['Turn RED illumination (>610 nm) and the matching optical ' ...
+    'filter ON. Refocus 100-500 um below the surface vasculature, ' ...
+    'adjust intensity without saturation, then hit any key / q to abort.']);
+
+if result.red_setup_preview
+    try
+        preview(vid);
+        cameraPreviewStarted = true;
+        pause(0.5);
+        drawnow;
+    catch ME
+        warning('Red setup preview failed: %s',ME.message);
+        cameraPreviewStarted = false;
+    end
+end
+
 startKeyCode = wait_for_new_key(false);
+
+if cameraPreviewStarted
+    try
+        previewFrameRaw = getsnapshot(vid);
+
+        if isinteger(previewFrameRaw)
+            previewMaximum = double(intmax(class(previewFrameRaw)));
+            formatBitDepth = regexpi( ...
+                char(result.camera.videoFormat),'Mono(\d+)', ...
+                'tokens','once');
+
+            if ~isempty(formatBitDepth)
+                previewMaximum = min(previewMaximum, ...
+                    2^str2double(formatBitDepth{1})-1);
+            end
+        else
+            previewMaximum = double(max(previewFrameRaw(:)));
+        end
+
+        if ndims(previewFrameRaw) == 3
+            previewFrame = mean(double(previewFrameRaw),3);
+        else
+            previewFrame = double(previewFrameRaw);
+        end
+
+        previewValues = previewFrame(isfinite(previewFrame));
+
+        result.redSetup.previewIntensity.p01 = ...
+            prctile(previewValues,1);
+        result.redSetup.previewIntensity.median = ...
+            median(previewValues);
+        result.redSetup.previewIntensity.p99 = ...
+            prctile(previewValues,99);
+        result.redSetup.previewIntensity.maximumPossible = ...
+            previewMaximum;
+        result.redSetup.previewIntensity.saturatedFraction = ...
+            mean(previewValues >= previewMaximum);
+
+        fprintf(['Red preview intensity: p1=%.1f, median=%.1f, ' ...
+            'p99=%.1f / %.1f, saturated=%.4f%%.\n'], ...
+            result.redSetup.previewIntensity.p01, ...
+            result.redSetup.previewIntensity.median, ...
+            result.redSetup.previewIntensity.p99,previewMaximum, ...
+            100*result.redSetup.previewIntensity.saturatedFraction);
+
+        if result.redSetup.previewIntensity.p99 < 0.55*previewMaximum
+            warning(['Red preview uses less than 55%% of the camera ' ...
+                'range. Increase red illumination/exposure if safe.']);
+        elseif result.redSetup.previewIntensity.saturatedFraction > 0.001
+            warning(['More than 0.1%% of red-preview pixels are ' ...
+                'saturated. Reduce illumination/exposure.']);
+        end
+    catch ME
+        warning('Red preview intensity QC failed: %s',ME.message);
+    end
+
+    closepreview(vid);
+    cameraPreviewStarted = false;
+    drawnow;
+end
 
 if startKeyCode(KbName('q')) || startKeyCode(KbName('Q'))
     quitRequested = true;
@@ -500,6 +767,18 @@ try
         end
 
         result.tr_num = result.tr_num + 1;
+        result.block.currentName = blockNames(istimNT);
+        result.dirflag = blockAxis(istimNT);
+        result.reverseflag = logical(blockReverse(istimNT));
+        result.current_period_sec = result.block.period_sec(istimNT);
+        result.movieDurationFrames = round( ...
+            result.current_period_sec * wininfo.frameRate);
+        result.blockDurationFrames = ...
+            result.movieDurationFrames * result.sweeps_per_block;
+        result.stimduration = ...
+            result.current_period_sec * result.sweeps_per_block;
+        result = get_movie_stim(result);
+
         activeTrialIndex = result.tr_num;
         activeSessionType = "red";
         activeGreenSessionIndex = 0;
@@ -508,14 +787,9 @@ try
             sprintf('block_%d_start',result.tr_num), ...
             result.tr_num);
 
-        result.block.currentName = blockNames(istimNT);
-        result.dirflag = blockAxis(istimNT);
-        result.reverseflag = logical(blockReverse(istimNT));
-        result = get_movie_stim(result);
-
         fprintf('\nBlock %d/%d: %s, %d sweeps x %.3f sec\n', ...
             istimNT,nTrials,char(blockNames(istimNT)), ...
-            result.sweeps_per_block,result.contrast_period);
+            result.sweeps_per_block,result.current_period_sec);
 
         tifFile = fullfile(result.camera_save_folder, ...
             sprintf('red_block%02d_%s.tif',result.tr_num, ...
@@ -779,15 +1053,20 @@ end
 %%%%% ALL THE INNER FXNS %%%%%
 
     function run_green_imaging_session(sessionIndex)
+        validateattributes(sessionIndex,{'numeric'}, ...
+            {'scalar','integer','positive'});
         nGreenBlocks = numel(greenBlockNames);
-        greenStimDuration = ...
-            result.contrast_period * greenSweepsPerBlock;
-        greenPlannedTrialDuration = ...
-            result.isipre + greenStimDuration + result.isipost;
-        greenPlannedFrameCount = ...
-            round(greenPlannedTrialDuration * result.camera_fps);
-        greenBlockDurationFrames = ...
-            result.movieDurationFrames * greenSweepsPerBlock;
+        greenBlockPeriods_sec = result.green.block.period_sec(:);
+        greenStimDuration_sec = ...
+            greenBlockPeriods_sec * greenSweepsPerBlock;
+        greenPlannedTrialDuration_sec = result.isipre + ...
+            greenStimDuration_sec + result.isipost;
+        greenPlannedFrameCount = round( ...
+            greenPlannedTrialDuration_sec * result.camera_fps);
+        greenMovieDurationFrames = round( ...
+            greenBlockPeriods_sec * wininfo.frameRate);
+        maxGreenBlockDurationFrames = ...
+            max(greenMovieDurationFrames) * greenSweepsPerBlock;
 
         result.green.sessionCount = sessionIndex;
         result.green.sessions(sessionIndex).sessionIndex = sessionIndex;
@@ -800,6 +1079,8 @@ end
             greenBlockAxis;
         result.green.sessions(sessionIndex).block.reverse = ...
             logical(greenBlockReverse);
+        result.green.sessions(sessionIndex).block.period_sec = ...
+            greenBlockPeriods_sec;
         result.green.sessions(sessionIndex).block.firstStimFlip_sec = ...
             nan(nGreenBlocks,1);
         result.green.sessions(sessionIndex).block.lastStimFlip_sec = ...
@@ -813,16 +1094,16 @@ end
         result.green.sessions(sessionIndex).timestamp = ...
             nan(nGreenBlocks,1);
         result.green.sessions(sessionIndex).displayTiming.ptbFlipTime_sec = ...
-            nan(nGreenBlocks,greenBlockDurationFrames);
+            nan(nGreenBlocks,maxGreenBlockDurationFrames);
         result.green.sessions( ...
             sessionIndex).displayTiming.ptbMissedDeadline_sec = ...
-            nan(nGreenBlocks,greenBlockDurationFrames);
+            nan(nGreenBlocks,maxGreenBlockDurationFrames);
 
         result.green.sessions( ...
             sessionIndex).camera.plannedTrialDuration_sec = ...
-            repmat(greenPlannedTrialDuration,nGreenBlocks,1);
+            greenPlannedTrialDuration_sec;
         result.green.sessions(sessionIndex).camera.targetFrameCount = ...
-            repmat(greenPlannedFrameCount,nGreenBlocks,1);
+            greenPlannedFrameCount;
         result.green.sessions(sessionIndex).camera.actualRecordTime_sec = ...
             nan(nGreenBlocks,1);
         result.green.sessions(sessionIndex).camera.actualFrameCount = ...
@@ -875,9 +1156,10 @@ end
             sprintf('green_session_%d_start',sessionIndex),0);
 
         fprintf(['\nGreen-light imaging session %d: %d blocks x ' ...
-            '%d sweeps x %.3f sec\n'], ...
-            sessionIndex,nGreenBlocks,greenSweepsPerBlock, ...
-            result.contrast_period);
+            '%d sweeps; azimuth %.3f sec/sweep, elevation %.3f ' ...
+            'sec/sweep\n'],sessionIndex,nGreenBlocks, ...
+            greenSweepsPerBlock,result.stimulus.azimuthPeriod_sec, ...
+            result.stimulus.elevationPeriod_sec);
 
         for greenBlockIdx = 1:nGreenBlocks
             if check_for_quit()
@@ -895,8 +1177,14 @@ end
             greenStim = result;
             greenStim.tr_num = greenBlockIdx;
             greenStim.sweeps_per_block = greenSweepsPerBlock;
-            greenStim.stimduration = greenStimDuration;
-            greenStim.blockDurationFrames = greenBlockDurationFrames;
+            greenStim.current_period_sec = ...
+                greenBlockPeriods_sec(greenBlockIdx);
+            greenStim.movieDurationFrames = ...
+                greenMovieDurationFrames(greenBlockIdx);
+            greenStim.stimduration = ...
+                greenStimDuration_sec(greenBlockIdx);
+            greenStim.blockDurationFrames = ...
+                greenStim.movieDurationFrames * greenSweepsPerBlock;
             greenStim.dirflag = greenBlockAxis(greenBlockIdx);
             greenStim.reverseflag = ...
                 logical(greenBlockReverse(greenBlockIdx));
@@ -911,7 +1199,7 @@ end
                 '%d sweeps x %.3f sec\n'], ...
                 sessionIndex,greenBlockIdx,nGreenBlocks, ...
                 char(greenBlockNames(greenBlockIdx)), ...
-                greenSweepsPerBlock,result.contrast_period);
+                greenSweepsPerBlock,greenStim.current_period_sec);
 
             tifFile = fullfile(result.camera_save_folder, ...
                 sprintf('green_session%02d_block%02d_%s.tif', ...
@@ -997,10 +1285,12 @@ end
                 greenBlockIdx,:) = sweepLastFlips - greenSessionT0;
             result.green.sessions( ...
                 sessionIndex).displayTiming.ptbFlipTime_sec( ...
-                greenBlockIdx,:) = flipTimes - greenSessionT0;
+                greenBlockIdx,1:numel(flipTimes)) = ...
+                flipTimes - greenSessionT0;
             result.green.sessions( ...
                 sessionIndex).displayTiming.ptbMissedDeadline_sec( ...
-                greenBlockIdx,:) = missedDeadlines;
+                greenBlockIdx,1:numel(missedDeadlines)) = ...
+                missedDeadlines;
             result.green.sessions(sessionIndex).camera.stimulus_sec( ...
                 greenBlockIdx) = lastStimFlip - firstStimFlip;
 
@@ -1152,7 +1442,7 @@ end
 
                 Screen('DrawTexture',wininfoLocal.w, ...
                     thisstim.tex(itex),[], ...
-                    [0 0 wininfoLocal.xRes wininfoLocal.xRes]);
+                    thisstim.stimulus.destinationRect_pix);
 
                 blockFrameIdx = ...
                     (sweepIdx-1)*thisstim.movieDurationFrames + itex;
@@ -1509,7 +1799,7 @@ end
         tagStruct.RowsPerStrip = min(64,size(oneFrame,1));
         tagStruct.Orientation = Tiff.Orientation.TopLeft;
         tagStruct.Software = ...
-            'MATLAB run_cmnoise_no_frame2ttl_bpod';
+            'MATLAB run_cmnoise_green_red';
     end
 
     function [firstFlip,lastFlip] = ...
@@ -1530,7 +1820,7 @@ end
                 Screen('DrawTexture',wininfoLocal.w, ...
                     thisstim.tex(itex), ...
                     [], ...
-                    [0 0 wininfoLocal.xRes wininfoLocal.xRes]);
+                    thisstim.stimulus.destinationRect_pix);
 
                 blockFrameIdx = ...
                     (sweepIdx-1)*thisstim.movieDurationFrames + itex;
@@ -1752,9 +2042,21 @@ end
         result.contrast = result.contrast_list(randperm(numel(result.contrast_list),1));
         result.contrast_idx = find(result.contrast_list == result.contrast,1);
        % disp(['contrast requested: ', num2str(result.contrast)])
+        moviePeriod_sec = result.contrast_period;
+
+        if isfield(result,'current_period_sec') && ...
+                isfinite(result.current_period_sec) && ...
+                result.current_period_sec > 0
+            moviePeriod_sec = result.current_period_sec;
+        end
+
         result.moviedata{result.tr_num} = generateNoise_xyt_uday( ...
-            result.sFreqs,result.tFreqs,result.contrast_period, ...
+            result.sFreqs,result.tFreqs,moviePeriod_sec, ...
             wininfo,result,result.movtype);
+        result.movieDurationFrames = size( ...
+            result.moviedata{result.tr_num},3);
+        result.blockDurationFrames = ...
+            result.movieDurationFrames * result.sweeps_per_block;
 %        toc
        result.contrasts_by_trial(result.tr_num) = result.contrast;
         
