@@ -14,7 +14,7 @@ function analysis = analyze_cmnoise_retinotopy_parallel(sessionFolder,varargin)
 %
 %   Examples:
 %       analyze_cmnoise_retinotopy_parallel(folder, ...
-%           'session_type','red','num_workers',4)
+%           'session_type','red','num_workers',8)
 %       analyze_cmnoise_retinotopy_parallel(folder, ...
 %           'session_type','green','green_session_index',1)
 

@@ -11,9 +11,10 @@ function analysis = analyze_cmnoise_retinotopy(sessionFolder,varargin)
 %     1. Delta absorbance = log10(Ia/I0), where I0 defaults to each
 %        block's gray pre-ITI; no separately recorded baseline is required.
 %     2. Per-sweep DFT at the aperture sweep frequency using all sweep frames.
-%     3. Phase-coherence and response-amplitude quality diagnostics.
-%     4. Absolute phase = (forward - reverse)/2.
-%     5. VFS = sin(elevation-gradient angle - azimuth-gradient angle).
+%     3. Retain sweeps only when DFT-phase normalized variance > 0.6.
+%     4. Spatially filter retained-trial averages before absolute phase.
+%     5. Absolute phase = (forward - reverse)/2.
+%     6. VFS = sin(elevation-gradient angle - azimuth-gradient angle).
 %
 %   Example interactive use:
 %       analyze_cmnoise_retinotopy
@@ -26,7 +27,7 @@ function analysis = analyze_cmnoise_retinotopy(sessionFolder,varargin)
 %
 %   Block-level parallel processing (Parallel Computing Toolbox):
 %       analyze_cmnoise_retinotopy(folder,'session_type','red', ...
-%           'use_parallel',true,'num_workers',4)
+%           'use_parallel',true,'num_workers',8)
 
 if nargin < 1 || isempty(sessionFolder) || ...
         strlength(string(sessionFolder)) == 0
@@ -51,10 +52,13 @@ p.addParameter('green_session_index',[], ...
     isfinite(x) && x >= 1 && mod(x,1) == 0));
 p.addParameter('result_file','',@(x)ischar(x) || isstring(x));
 p.addParameter('output_folder','',@(x)ischar(x) || isstring(x));
-p.addParameter('map_smoothing_sigma',3, ...
+p.addParameter('spatial_filter_sigmas',[0 3 5 7 10 15], ...
+    @(x)isnumeric(x) && isvector(x) && ~isempty(x) && ...
+    all(isfinite(x)) && all(x >= 0));
+p.addParameter('representative_spatial_filter_sigma',10, ...
     @(x)isnumeric(x) && isscalar(x) && isfinite(x) && x >= 0);
-p.addParameter('vfs_smoothing_sigma',3.5, ...
-    @(x)isnumeric(x) && isscalar(x) && isfinite(x) && x >= 0);
+p.addParameter('vfs_post_filter_sigma',7, ...
+    @(x)isnumeric(x) && isscalar(x) && isfinite(x) && x > 0);
 p.addParameter('register_blocks',true, ...
     @(x)islogical(x) || (isnumeric(x) && isscalar(x)));
 p.addParameter('registration_sample_frames',40, ...
@@ -68,9 +72,9 @@ p.addParameter('register_sweeps',true, ...
 p.addParameter('temporal_stride',1, ...
     @(x)isnumeric(x) && isscalar(x) && isfinite(x) && ...
     x >= 1 && mod(x,1) == 0);
-p.addParameter('minimum_phase_coherence',0.25, ...
+p.addParameter('minimum_normalized_variance',2.5, ...
     @(x)isnumeric(x) && isscalar(x) && isfinite(x) && ...
-    x >= 0 && x <= 1);
+    x >= 0);
 p.addParameter('crop_rect',[], ...
     @(x)isempty(x) || (isnumeric(x) && numel(x) == 4 && ...
     all(isfinite(x))));
@@ -87,14 +91,14 @@ p.addParameter('azimuth_phase_sign',1, ...
     @(x)isnumeric(x) && isscalar(x) && ismember(x,[-1 1]));
 p.addParameter('elevation_phase_sign',1, ...
     @(x)isnumeric(x) && isscalar(x) && ismember(x,[-1 1]));
-p.addParameter('overlay_alpha',0.65, ...
+p.addParameter('overlay_alpha',0.3, ...
     @(x)isnumeric(x) && isscalar(x) && isfinite(x) && ...
     x >= 0 && x <= 1);
 p.addParameter('show_figures',false, ...
     @(x)islogical(x) || (isnumeric(x) && isscalar(x)));
 p.addParameter('use_parallel',true, ...
     @(x)islogical(x) || (isnumeric(x) && isscalar(x)));
-p.addParameter('num_workers',4, ...
+p.addParameter('num_workers',8, ...
     @(x)isempty(x) || (isnumeric(x) && isscalar(x) && ...
     isfinite(x) && x >= 1 && mod(x,1) == 0));
 p.addParameter('parallel_block_batch_size',[], ...
@@ -106,6 +110,19 @@ opts.register_blocks = logical(opts.register_blocks);
 opts.register_sweeps = logical(opts.register_sweeps);
 opts.show_figures = logical(opts.show_figures);
 opts.use_parallel = logical(opts.use_parallel);
+opts.spatial_filter_sigmas = unique( ...
+    double(opts.spatial_filter_sigmas(:)'), 'stable');
+opts.representative_spatial_filter_sigma = ...
+    double(opts.representative_spatial_filter_sigma);
+opts.vfs_post_filter_sigma = double(opts.vfs_post_filter_sigma);
+opts.minimum_normalized_variance = ...
+    double(opts.minimum_normalized_variance);
+
+if ~ismember(opts.representative_spatial_filter_sigma, ...
+        opts.spatial_filter_sigmas)
+    error(['representative_spatial_filter_sigma must be included in ' ...
+        'spatial_filter_sigmas.']);
+end
 
 sessionFolder = char(string(sessionFolder));
 
@@ -167,7 +184,7 @@ analysisBlocks = repmat(struct( ...
     'sweepRegistrationShiftXY_pix',[], ...
     'timingSource',"",'baselineSource',"", ...
     'baselineFrameCount',0, ...
-    'responseAmplitudeMedian',[],'responseAmplitude95',[], ...
+    'normalizedVariance',[], ...
     'retainedSweeps',[],'framesPerSweep',[], ...
     'retainedSweepCount',0),cfg.nBlocks,1);
 
@@ -232,10 +249,8 @@ for batchStart = 1:batchSize:cfg.nBlocks
             string(blockResult.baselineSource);
         analysisBlocks(blockIndex).baselineFrameCount = ...
             blockResult.baselineFrameCount;
-        analysisBlocks(blockIndex).responseAmplitudeMedian = ...
-            blockResult.responseAmplitudeMedian;
-        analysisBlocks(blockIndex).responseAmplitude95 = ...
-            blockResult.responseAmplitude95;
+        analysisBlocks(blockIndex).normalizedVariance = ...
+            blockResult.normalizedVariance;
         analysisBlocks(blockIndex).retainedSweeps = ...
             blockResult.retainedSweeps;
         analysisBlocks(blockIndex).framesPerSweep = ...
@@ -252,37 +267,77 @@ qcTable = vertcat(qcTables{:});
 qcFile = fullfile(outputFolder,'sweep_quality_control.csv');
 writetable(qcTable,qcFile);
 
-repetitionMaps = cell(cfg.nRepetitions,1);
+representativeSigmaIndex = find( ...
+    opts.spatial_filter_sigmas == ...
+    opts.representative_spatial_filter_sigma,1,'first');
+nSpatialFilterSigmas = numel(opts.spatial_filter_sigmas);
+spatialFilterResults = repmat(struct( ...
+    'sigma_px',NaN,'isRepresentative',false,'matFile',""), ...
+    nSpatialFilterSigmas,1);
+sigmaOverallMaps = cell(nSpatialFilterSigmas,1);
+representativeMaps = [];
 
-for repetitionIndex = 1:cfg.nRepetitions
-    repetitionMap = make_retinotopy_maps( ...
-        repetitionAggregates(repetitionIndex),cfg,opts);
-    repetitionMap.repetition = repetitionIndex;
-    repetitionMaps{repetitionIndex} = repetitionMap;
+for sigmaIndex = 1:nSpatialFilterSigmas
+    spatialSigma = opts.spatial_filter_sigmas(sigmaIndex);
+    sigmaRepetitionMaps = cell(cfg.nRepetitions,1);
 
-    repetitionFile = fullfile(outputFolder,sprintf( ...
-        'repetition_%02d_maps.mat',repetitionIndex));
-    save(repetitionFile,'repetitionMap','-v7.3');
+    for repetitionIndex = 1:cfg.nRepetitions
+        repetitionMap = make_retinotopy_maps( ...
+            repetitionAggregates(repetitionIndex),cfg,spatialSigma, ...
+            opts.vfs_post_filter_sigma);
+        repetitionMap.repetition = repetitionIndex;
+        sigmaRepetitionMaps{repetitionIndex} = repetitionMap;
 
-    plot_maps(repetitionMap,cfg,opts, ...
-        fullfile(outputFolder,sprintf( ...
-        'repetition_%02d_maps.png',repetitionIndex)), ...
-        sprintf('%s repetition %d',upper(cfg.sessionType), ...
-        repetitionIndex));
+        if sigmaIndex == representativeSigmaIndex
+            repetitionFile = fullfile(outputFolder,sprintf( ...
+                'repetition_%02d_maps.mat',repetitionIndex));
+            save(repetitionFile,'repetitionMap','-v7.3');
+
+            plot_maps(repetitionMap,cfg,opts, ...
+                fullfile(outputFolder,sprintf( ...
+                'repetition_%02d_maps.png',repetitionIndex)), ...
+                sprintf('%s repetition %d (th1 = %g px, th2 = %g px)', ...
+                upper(cfg.sessionType),repetitionIndex,spatialSigma, ...
+                opts.vfs_post_filter_sigma));
+        end
+    end
+
+    sigmaRepetitionMaps = vertcat(sigmaRepetitionMaps{:});
+    sigmaOverallMap = make_repetition_consensus_maps( ...
+        sigmaRepetitionMaps,cfg);
+    sigmaOverallMaps{sigmaIndex} = sigmaOverallMap;
+    sigmaResult = struct();
+    sigmaResult.sigma_px = spatialSigma;
+    sigmaResult.repetitions = sigmaRepetitionMaps;
+    sigmaResult.overall = sigmaOverallMap;
+    sigmaResult.isRepresentative = sigmaIndex == representativeSigmaIndex;
+    sigmaFile = fullfile(outputFolder,sprintf( ...
+        'spatial_filter_sigma_%s_maps.mat', ...
+        spatial_filter_sigma_label(spatialSigma)));
+    save(sigmaFile,'sigmaResult','-v7.3');
+    spatialFilterResults(sigmaIndex).sigma_px = spatialSigma;
+    spatialFilterResults(sigmaIndex).isRepresentative = ...
+        sigmaIndex == representativeSigmaIndex;
+    spatialFilterResults(sigmaIndex).matFile = string(sigmaFile);
+
+    if sigmaIndex == representativeSigmaIndex
+        representativeMaps = sigmaRepetitionMaps;
+    end
 end
 
-repetitionMaps = vertcat(repetitionMaps{:});
-
-% Combine the already quality-controlled coordinate estimates rather than
-% summing raw complex responses across repetitions. Repetition-to-
-% repetition phase offsets otherwise cancel in the complex sum and make a
-% valid field disappear under the phase-coherence threshold. A pixelwise
-% median is robust to both phase-wrap branches and an outlying repetition.
-overallMaps = make_repetition_consensus_maps( ...
-    repetitionMaps,cfg,opts);
-quality = summarize_quality(overallMaps,repetitionMaps);
+repetitionMaps = representativeMaps;
+overallMaps = sigmaOverallMaps{representativeSigmaIndex};
+quality = summarize_quality(qcTable,repetitionMaps);
 plot_maps(overallMaps,cfg,opts, ...
     fullfile(outputFolder,'overall_maps.png'), ...
+    sprintf('%s all repetitions (th1 = %g px, th2 = %g px)', ...
+    upper(cfg.sessionType),opts.representative_spatial_filter_sigma, ...
+    opts.vfs_post_filter_sigma));
+
+sigmaComparisonFile = fullfile(outputFolder, ...
+    'spatial_filter_sigma_comparison.png');
+plot_spatial_filter_comparison(sigmaOverallMaps, ...
+    opts.spatial_filter_sigmas,cfg,opts,sigmaComparisonFile, ...
     sprintf('%s all repetitions',upper(cfg.sessionType)));
 
 firstBaselineFile = fullfile(outputFolder, ...
@@ -291,7 +346,7 @@ write_reference_image(referenceFirstFrame,firstBaselineFile);
 
 overlayFile = fullfile(outputFolder, ...
     'overall_vfs_overlay_first_baseline.png');
-write_vfs_overlay(referenceFirstFrame,overallMaps.vfs, ...
+write_vfs_overlay(referenceFirstFrame,overallMaps.vfsPostFiltered, ...
     overlayFile,opts);
 
 analysis = struct();
@@ -300,10 +355,14 @@ analysis.method = [ ...
     "Nsiangani et al., Scientific Reports 2022"; ...
     "Modified Beer-Lambert log10(Ia/I0)"; ...
     "Per-sweep full-duration DFT at stimulus frequency"; ...
-    "Phase coherence and response-amplitude QC"; ...
+    string(sprintf(['Trial QC = DFT phase-map normalized variance > ' ...
+    '%g'],opts.minimum_normalized_variance)); ...
+    "Gaussian spatial filtering after retained-trial averaging"; ...
     "Overall map = robust median of repetition coordinate maps"; ...
     "Absolute phase = (forward - reverse)/2"; ...
-    "VFS gradient-angle sine"];
+    "VFS gradient-angle sine"; ...
+    string(sprintf('Haiderlab VFS FFT post-filter (th2 = %g px)', ...
+    opts.vfs_post_filter_sigma))];
 analysis.sessionFolder = string(sessionFolder);
 analysis.resultFile = string(resultFile);
 analysis.outputFolder = string(outputFolder);
@@ -317,6 +376,11 @@ analysis.reference.firstBaselineFrameFile = string(firstBaselineFile);
 analysis.blocks = analysisBlocks;
 analysis.repetitions = repetitionMaps;
 analysis.overall = overallMaps;
+analysis.representativeSpatialFilterSigma_px = ...
+    opts.representative_spatial_filter_sigma;
+analysis.vfsPostFilterSigma_px = opts.vfs_post_filter_sigma;
+analysis.spatialFilterResults = spatialFilterResults;
+analysis.spatialFilterComparisonFile = string(sigmaComparisonFile);
 analysis.quality = quality;
 analysis.qcTableFile = string(qcFile);
 analysis.overlayFile = string(overlayFile);
@@ -328,13 +392,15 @@ save(analysisFile,'analysis','-v7.3');
 fprintf('\nAnalysis completed.\n');
 fprintf('Overall maps: %s\n', ...
     fullfile(outputFolder,'overall_maps.png'));
+fprintf('Spatial-filter comparison: %s\n',sigmaComparisonFile);
 fprintf('VFS overlay: %s\n',overlayFile);
 fprintf('First baseline frame: %s\n',firstBaselineFile);
 fprintf('MAT result: %s\n',analysisFile);
-fprintf(['Median pair coherence: azimuth %.3f, elevation %.3f; ' ...
-    'mean repetition correlation: azimuth %.3f, elevation %.3f.\n'], ...
-    quality.medianAzimuthCoherence, ...
-    quality.medianElevationCoherence, ...
+fprintf(['Retained sweeps: %d/%d (%.1f%%); median normalized variance ' ...
+    '%.3f; mean repetition correlation: azimuth %.3f, elevation %.3f.\n'], ...
+    quality.retainedSweepCount,quality.totalSweepCount, ...
+    100*quality.retainedSweepFraction, ...
+    quality.medianNormalizedVariance, ...
     quality.meanRepetitionAzimuthCorrelation, ...
     quality.meanRepetitionElevationCorrelation);
 end
@@ -400,12 +466,16 @@ batchSize = max(1,min([requestedBatchSize, ...
 end
 
 
-function quality = summarize_quality(overallMaps,repetitionMaps)
+function quality = summarize_quality(qcTable,repetitionMaps)
 quality = struct();
-quality.medianAzimuthCoherence = median( ...
-    overallMaps.azimuthCoherence(:),'omitnan');
-quality.medianElevationCoherence = median( ...
-    overallMaps.elevationCoherence(:),'omitnan');
+quality.totalSweepCount = height(qcTable);
+quality.retainedSweepCount = nnz(qcTable.Retained);
+quality.discardedSweepCount = quality.totalSweepCount - ...
+    quality.retainedSweepCount;
+quality.retainedSweepFraction = quality.retainedSweepCount / ...
+    max(quality.totalSweepCount,1);
+quality.medianNormalizedVariance = median( ...
+    qcTable.NormalizedVariance,'omitnan');
 nRepetitions = numel(repetitionMaps);
 quality.repetitionAzimuthCorrelation = nan(nRepetitions);
 quality.repetitionElevationCorrelation = nan(nRepetitions);
@@ -517,6 +587,8 @@ cfg.resultFile = string(resultFile);
 cfg.cameraFPS = double(result.camera_fps);
 cfg.preITI_sec = double(result.isipre);
 cfg.greenSessionIndex = NaN;
+cfg.azimuthPhaseSign = double(opts.azimuth_phase_sign);
+cfg.elevationPhaseSign = double(opts.elevation_phase_sign);
 
 if isempty(opts.azimuth_range_deg)
     horizontalDeg = 2*atand((double(result.HorzScreenSize)/2) / ...
@@ -883,10 +955,10 @@ fprintf('\nBlock %d/%d (%s), repetition %d\n', ...
     repetitionIndex);
 
 for sweepIndex = 1:numel(blockResult.framesPerSweep)
-    fprintf(['  sweep %02d: amplitude p95 %.3g, analyzed=%d, ' ...
+    fprintf(['  sweep %02d: normalized variance %.3f, retained=%d, ' ...
         'frames=%d, shift=[%g %g]\n'], ...
         sweepIndex, ...
-        blockResult.responseAmplitude95(sweepIndex), ...
+        blockResult.normalizedVariance(sweepIndex), ...
         blockResult.retainedSweeps(sweepIndex), ...
         blockResult.framesPerSweep(sweepIndex), ...
         blockResult.sweepRegistrationShiftXY_pix(sweepIndex,1), ...
@@ -969,9 +1041,7 @@ end
 mapSize = size(baselineForBlock);
 retainedComplexSum = complex(zeros(mapSize));
 retainedValidCount = zeros(mapSize);
-retainedAmplitudeSum = zeros(mapSize);
-responseAmplitudeMedian = nan(blockConfig.sweepsPerBlock,1);
-responseAmplitude95 = nan(blockConfig.sweepsPerBlock,1);
+normalizedVariance = nan(blockConfig.sweepsPerBlock,1);
 retainedSweeps = false(blockConfig.sweepsPerBlock,1);
 framesPerSweep = zeros(blockConfig.sweepsPerBlock,1);
 sweepShiftXY = nan(blockConfig.sweepsPerBlock,2);
@@ -997,11 +1067,15 @@ for sweepIndex = 1:blockConfig.sweepsPerBlock
         tiffReader,tifFile,frameIndices,complexWeights, ...
         baselineForBlock,referenceMean,blockShiftXY,opts);
     sweepShiftXY(sweepIndex,:) = sweepResult.shiftXY;
-    responseAmplitudeMedian(sweepIndex) = ...
-        sweepResult.responseAmplitudeMedian;
-    responseAmplitude95(sweepIndex) = ...
-        sweepResult.responseAmplitude95;
-    retainedSweeps(sweepIndex) = true;
+    normalizedVariance(sweepIndex) = sweepResult.normalizedVariance;
+    retainedSweeps(sweepIndex) = ...
+        sweepResult.normalizedVariance > ...
+        opts.minimum_normalized_variance;
+
+    if ~retainedSweeps(sweepIndex)
+        continue;
+    end
+
     validCoefficient = sweepResult.validCoefficient;
     coefficient = sweepResult.coefficient;
     retainedComplexSum(validCoefficient) = ...
@@ -1009,18 +1083,13 @@ for sweepIndex = 1:blockConfig.sweepsPerBlock
         coefficient(validCoefficient);
     retainedValidCount(validCoefficient) = ...
         retainedValidCount(validCoefficient) + 1;
-    retainedAmplitudeSum(validCoefficient) = ...
-        retainedAmplitudeSum(validCoefficient) + ...
-        abs(coefficient(validCoefficient));
 end
 
 blockResult = struct();
 blockResult.retainedComplexSum = retainedComplexSum;
 blockResult.retainedValidCount = retainedValidCount;
-blockResult.retainedAmplitudeSum = retainedAmplitudeSum;
 blockResult.retainedSweepCount = sum(retainedSweeps);
-blockResult.responseAmplitudeMedian = responseAmplitudeMedian;
-blockResult.responseAmplitude95 = responseAmplitude95;
+blockResult.normalizedVariance = normalizedVariance;
 blockResult.retainedSweeps = retainedSweeps;
 blockResult.framesPerSweep = framesPerSweep;
 blockResult.registrationShiftXY_pix = blockShiftXY;
@@ -1030,7 +1099,8 @@ blockResult.baselineSource = baselineSource;
 blockResult.baselineFrameCount = baselineFrameCount;
 
 if blockResult.retainedSweepCount == 0
-    warning('No sweep could be analyzed for block %d (%s).', ...
+    warning(['No sweep passed the normalized-variance criterion for ' ...
+        'block %d (%s).'], ...
         blockIndex, ...
         char(blockConfig.blockName));
 end
@@ -1075,21 +1145,40 @@ for localFrameIndex = 1:numel(frameIndices)
 end
 
 coefficient(~validCoefficient) = complex(NaN,NaN);
-finiteAmplitude = abs(coefficient(validCoefficient));
-responseAmplitudeMedian = NaN;
-responseAmplitude95 = NaN;
-
-if ~isempty(finiteAmplitude)
-    responseAmplitudeMedian = percentile_local(finiteAmplitude,50);
-    responseAmplitude95 = percentile_local(finiteAmplitude,95);
-end
 
 sweepResult = struct();
 sweepResult.shiftXY = thisShiftXY;
-sweepResult.responseAmplitudeMedian = responseAmplitudeMedian;
-sweepResult.responseAmplitude95 = responseAmplitude95;
+sweepResult.normalizedVariance = ...
+    calculate_phase_map_normalized_variance( ...
+    coefficient,validCoefficient);
 sweepResult.coefficient = coefficient;
 sweepResult.validCoefficient = validCoefficient;
+end
+
+
+function normalizedVariance = calculate_phase_map_normalized_variance( ...
+        coefficient,validCoefficient)
+% Nsiangani et al. 2022 / haiderlab ISI g_map.m definition:
+% discard phase values within +/-0.025 rad, calculate the phase variance
+% before and after moving negative phases to [0, 2*pi), and retain the
+% smaller variance to avoid a phase-wrap artifact at -pi/pi.
+phaseMap = angle(coefficient);
+phaseValues = phaseMap(validCoefficient & isfinite(phaseMap));
+phaseValues(abs(phaseValues) < 0.025) = NaN;
+phaseValues = phaseValues(isfinite(phaseValues));
+
+if numel(phaseValues) < 2
+    normalizedVariance = NaN;
+    return;
+end
+
+directVariance = var(phaseValues,0);
+positivePhaseValues = phaseValues;
+negativePhase = positivePhaseValues < 0;
+positivePhaseValues(negativePhase) = ...
+    positivePhaseValues(negativePhase) + 2*pi;
+wrappedVariance = var(positivePhaseValues,0);
+normalizedVariance = min(directVariance,wrappedVariance);
 end
 
 
@@ -1125,7 +1214,6 @@ function aggregate = new_direction_aggregate(mapSize)
 aggregate = struct();
 aggregate.complexSum = complex(zeros([mapSize 4]));
 aggregate.validCount = zeros([mapSize 4]);
-aggregate.amplitudeSum = zeros([mapSize 4]);
 aggregate.retainedSweepCount = zeros(4,1);
 end
 
@@ -1138,9 +1226,6 @@ aggregate.complexSum(:,:,directionIndex) = ...
 aggregate.validCount(:,:,directionIndex) = ...
     aggregate.validCount(:,:,directionIndex) + ...
     blockResult.retainedValidCount;
-aggregate.amplitudeSum(:,:,directionIndex) = ...
-    aggregate.amplitudeSum(:,:,directionIndex) + ...
-    blockResult.retainedAmplitudeSum;
 aggregate.retainedSweepCount(directionIndex) = ...
     aggregate.retainedSweepCount(directionIndex) + ...
     blockResult.retainedSweepCount;
@@ -1172,8 +1257,7 @@ Repetition = repmat(cfg.blockRepetition(blockIndex),nSweeps,1);
 BlockIndex = repmat(blockIndex,nSweeps,1);
 BlockName = repmat(cfg.blockNames(blockIndex),nSweeps,1);
 SweepIndex = (1:nSweeps)';
-ResponseAmplitudeMedian = blockResult.responseAmplitudeMedian(:);
-ResponseAmplitude95 = blockResult.responseAmplitude95(:);
+NormalizedVariance = blockResult.normalizedVariance(:);
 Retained = blockResult.retainedSweeps(:);
 FrameCount = blockResult.framesPerSweep(:);
 RegistrationShiftX_pix = ...
@@ -1182,95 +1266,64 @@ RegistrationShiftY_pix = ...
     blockResult.sweepRegistrationShiftXY_pix(:,2);
 TIFF_File = repmat(string(cfg.blockFiles{blockIndex}),nSweeps,1);
 qcTable = table(SessionType,GreenSession,Repetition,BlockIndex, ...
-    BlockName,SweepIndex,ResponseAmplitudeMedian, ...
-    ResponseAmplitude95,Retained,FrameCount,RegistrationShiftX_pix, ...
+    BlockName,SweepIndex,NormalizedVariance,Retained,FrameCount, ...
+    RegistrationShiftX_pix, ...
     RegistrationShiftY_pix,TIFF_File);
 end
 
 
-function maps = make_retinotopy_maps(aggregate,cfg,opts)
+function maps = make_retinotopy_maps(aggregate,cfg,spatialFilterSigma,th2)
 mapSize = size(aggregate.complexSum(:,:,1));
 directionPhase = nan([mapSize 4]);
-directionAmplitude = nan([mapSize 4]);
-directionCoherence = nan([mapSize 4]);
 
 for directionIndex = 1:4
     sumSlice = aggregate.complexSum(:,:,directionIndex);
     countSlice = aggregate.validCount(:,:,directionIndex);
-    amplitudeSumSlice = aggregate.amplitudeSum(:,:,directionIndex);
     valid = countSlice > 0;
     directionMean = complex(nan(mapSize));
     directionMean(valid) = sumSlice(valid)./countSlice(valid);
+
+    % Paper-order spatial filtering: retained sweeps are averaged first,
+    % then the complex DFT response is filtered before phase subtraction.
     directionMean = nan_gaussian_complex_filter( ...
-        directionMean,opts.map_smoothing_sigma);
+        directionMean,spatialFilterSigma);
     directionPhase(:,:,directionIndex) = angle(directionMean);
-    directionAmplitude(:,:,directionIndex) = abs(directionMean);
-    coherenceValid = amplitudeSumSlice > 0;
-    coherenceSlice = nan(mapSize);
-    coherenceSlice(coherenceValid) = ...
-        abs(sumSlice(coherenceValid))./ ...
-        amplitudeSumSlice(coherenceValid);
-    directionCoherence(:,:,directionIndex) = ...
-        nan_gaussian_filter(coherenceSlice,opts.map_smoothing_sigma);
 end
 
-azimuthCoherence = nan(mapSize);
-elevationCoherence = nan(mapSize);
-azimuthForwardCoherence = directionCoherence(:,:,1);
-azimuthReverseCoherence = directionCoherence(:,:,2);
-elevationForwardCoherence = directionCoherence(:,:,3);
-elevationReverseCoherence = directionCoherence(:,:,4);
-azimuthPairValid = isfinite(azimuthForwardCoherence) & ...
-    isfinite(azimuthReverseCoherence);
-elevationPairValid = isfinite(elevationForwardCoherence) & ...
-    isfinite(elevationReverseCoherence);
-azimuthCoherence(azimuthPairValid) = min( ...
-    azimuthForwardCoherence(azimuthPairValid), ...
-    azimuthReverseCoherence(azimuthPairValid));
-elevationCoherence(elevationPairValid) = min( ...
-    elevationForwardCoherence(elevationPairValid), ...
-    elevationReverseCoherence(elevationPairValid));
-
-azimuthAmplitude = sqrt( ...
-    directionAmplitude(:,:,1).*directionAmplitude(:,:,2));
-elevationAmplitude = sqrt( ...
-    directionAmplitude(:,:,3).*directionAmplitude(:,:,4));
-azimuthAbsolutePhase = opts.azimuth_phase_sign* ...
+azimuthAbsolutePhase = cfg.azimuthPhaseSign* ...
     (directionPhase(:,:,1)-directionPhase(:,:,2))/2;
-elevationAbsolutePhase = opts.elevation_phase_sign* ...
+elevationAbsolutePhase = cfg.elevationPhaseSign* ...
     (directionPhase(:,:,3)-directionPhase(:,:,4))/2;
-azimuthSpan = cfg.azimuthTrajectorySpan_deg;
-elevationSpan = cfg.elevationTrajectorySpan_deg;
 azimuthCenter = mean(cfg.azimuthRange_deg);
 elevationCenter = mean(cfg.elevationRange_deg);
-azimuth_deg = azimuthCenter + ...
-    azimuthAbsolutePhase/(2*pi)*azimuthSpan;
-elevation_deg = elevationCenter + ...
-    elevationAbsolutePhase/(2*pi)*elevationSpan;
-azimuth_deg(azimuthCoherence < opts.minimum_phase_coherence) = NaN;
-elevation_deg(elevationCoherence < opts.minimum_phase_coherence) = NaN;
+azimuth_deg = azimuthCenter + azimuthAbsolutePhase/(2*pi)* ...
+    cfg.azimuthTrajectorySpan_deg;
+elevation_deg = elevationCenter + elevationAbsolutePhase/(2*pi)* ...
+    cfg.elevationTrajectorySpan_deg;
+
+% Exclude coordinates outside the physical screen before VFS calculation.
+azimuth_deg(azimuth_deg < cfg.azimuthRange_deg(1) | ...
+    azimuth_deg > cfg.azimuthRange_deg(2)) = NaN;
+elevation_deg(elevation_deg < cfg.elevationRange_deg(1) | ...
+    elevation_deg > cfg.elevationRange_deg(2)) = NaN;
 
 [azimuthDx,azimuthDy] = gradient(azimuth_deg);
 [elevationDx,elevationDy] = gradient(elevation_deg);
-azimuthGradientAngle = atan2(azimuthDy,azimuthDx);
-elevationGradientAngle = atan2(elevationDy,elevationDx);
+azimuthGradientAngle = atan2(-azimuthDy,azimuthDx);
+elevationGradientAngle = atan2(-elevationDy,elevationDx);
 vfs = sin(elevationGradientAngle-azimuthGradientAngle);
-vfs = nan_gaussian_filter(vfs,opts.vfs_smoothing_sigma);
+vfsUnfiltered = vfs;
+vfs = haiderlab_vfs_post_filter(vfs,th2);
 vfs = max(-1,min(1,vfs));
 
 maps = struct();
 maps.azimuth_deg = azimuth_deg;
 maps.elevation_deg = elevation_deg;
+maps.vfsUnfiltered = vfsUnfiltered;
 maps.vfs = vfs;
-maps.azimuthAbsolutePhase_rad = azimuthAbsolutePhase;
-maps.elevationAbsolutePhase_rad = elevationAbsolutePhase;
-maps.directionPhase_rad = directionPhase;
-maps.directionAmplitude = directionAmplitude;
-maps.directionCoherence = directionCoherence;
-maps.azimuthCoherence = azimuthCoherence;
-maps.elevationCoherence = elevationCoherence;
-maps.azimuthAmplitude = azimuthAmplitude;
-maps.elevationAmplitude = elevationAmplitude;
+maps.vfsPostFiltered = vfs;
+maps.spatialFilterSigma_px = spatialFilterSigma;
+maps.vfsPostFilterSigma_px = th2;
 maps.directionNames = cfg.directionNames;
 maps.retainedSweepCount = aggregate.retainedSweepCount;
 maps.azimuthRange_deg = cfg.azimuthRange_deg;
@@ -1278,8 +1331,7 @@ maps.elevationRange_deg = cfg.elevationRange_deg;
 end
 
 
-function maps = make_repetition_consensus_maps( ...
-        repetitionMaps,cfg,opts)
+function maps = make_repetition_consensus_maps(repetitionMaps,cfg)
 nRepetitions = numel(repetitionMaps);
 
 if nRepetitions < 1
@@ -1297,110 +1349,36 @@ maps.minimumRepetitionSupport = floor(nRepetitions/2) + 1;
     median_repetition_field(repetitionMaps,'azimuth_deg');
 [maps.elevation_deg,maps.elevationRepetitionSupportCount] = ...
     median_repetition_field(repetitionMaps,'elevation_deg');
-[maps.azimuthCoherence,~] = ...
-    median_repetition_field(repetitionMaps,'azimuthCoherence');
-[maps.elevationCoherence,~] = ...
-    median_repetition_field(repetitionMaps,'elevationCoherence');
-[maps.azimuthAmplitude,~] = ...
-    median_repetition_field(repetitionMaps,'azimuthAmplitude');
-[maps.elevationAmplitude,~] = ...
-    median_repetition_field(repetitionMaps,'elevationAmplitude');
-
 azimuthSupported = maps.azimuthRepetitionSupportCount >= ...
     maps.minimumRepetitionSupport;
 elevationSupported = maps.elevationRepetitionSupportCount >= ...
     maps.minimumRepetitionSupport;
 maps.azimuth_deg(~azimuthSupported) = NaN;
 maps.elevation_deg(~elevationSupported) = NaN;
-maps.azimuthCoherence(~azimuthSupported) = NaN;
-maps.elevationCoherence(~elevationSupported) = NaN;
-
-mapSize = size(maps.azimuth_deg);
-nDirections = size(repetitionMaps(1).directionPhase_rad,3);
-maps.directionPhase_rad = nan([mapSize nDirections]);
-maps.directionAmplitude = nan([mapSize nDirections]);
-maps.directionCoherence = nan([mapSize nDirections]);
-
-for directionIndex = 1:nDirections
-    weightedPhaseSum = complex(zeros(mapSize));
-    phaseWeightSum = zeros(mapSize);
-    coherenceSum = zeros(mapSize);
-    coherenceCount = zeros(mapSize);
-    amplitudeSum = zeros(mapSize);
-    amplitudeCount = zeros(mapSize);
-
-    for repetitionIndex = 1:nRepetitions
-        phase = repetitionMaps( ...
-            repetitionIndex).directionPhase_rad(:,:,directionIndex);
-        coherence = repetitionMaps( ...
-            repetitionIndex).directionCoherence(:,:,directionIndex);
-        amplitude = repetitionMaps( ...
-            repetitionIndex).directionAmplitude(:,:,directionIndex);
-        validPhase = isfinite(phase) & isfinite(coherence) & ...
-            coherence > 0;
-        phaseWeight = zeros(mapSize);
-        phaseWeight(validPhase) = coherence(validPhase);
-        weightedPhaseContribution = complex(zeros(mapSize));
-        weightedPhaseContribution(validPhase) = ...
-            phaseWeight(validPhase).*exp(1i*phase(validPhase));
-        weightedPhaseSum = weightedPhaseSum + ...
-            weightedPhaseContribution;
-        phaseWeightSum = phaseWeightSum + phaseWeight;
-
-        validCoherence = isfinite(coherence);
-        coherenceSum(validCoherence) = ...
-            coherenceSum(validCoherence) + coherence(validCoherence);
-        coherenceCount(validCoherence) = ...
-            coherenceCount(validCoherence) + 1;
-
-        validAmplitude = isfinite(amplitude);
-        amplitudeSum(validAmplitude) = ...
-            amplitudeSum(validAmplitude) + amplitude(validAmplitude);
-        amplitudeCount(validAmplitude) = ...
-            amplitudeCount(validAmplitude) + 1;
-    end
-
-    validPhaseAverage = phaseWeightSum > 0;
-    thisDirectionPhase = nan(mapSize);
-    thisDirectionPhase(validPhaseAverage) = angle( ...
-        weightedPhaseSum(validPhaseAverage));
-    maps.directionPhase_rad(:,:,directionIndex) = ...
-        thisDirectionPhase;
-
-    validCoherenceAverage = coherenceCount > 0;
-    thisDirectionCoherence = nan(mapSize);
-    thisDirectionCoherence(validCoherenceAverage) = ...
-        coherenceSum(validCoherenceAverage)./ ...
-        coherenceCount(validCoherenceAverage);
-    maps.directionCoherence(:,:,directionIndex) = ...
-        thisDirectionCoherence;
-
-    validAmplitudeAverage = amplitudeCount > 0;
-    thisDirectionAmplitude = nan(mapSize);
-    thisDirectionAmplitude(validAmplitudeAverage) = ...
-        amplitudeSum(validAmplitudeAverage)./ ...
-        amplitudeCount(validAmplitudeAverage);
-    maps.directionAmplitude(:,:,directionIndex) = ...
-        thisDirectionAmplitude;
-end
-
-azimuthCenter = mean(cfg.azimuthRange_deg);
-elevationCenter = mean(cfg.elevationRange_deg);
-maps.azimuthAbsolutePhase_rad = 2*pi * ...
-    (maps.azimuth_deg-azimuthCenter) / ...
-    cfg.azimuthTrajectorySpan_deg;
-maps.elevationAbsolutePhase_rad = 2*pi * ...
-    (maps.elevation_deg-elevationCenter) / ...
-    cfg.elevationTrajectorySpan_deg;
+% Exclude median coordinates outside the physical screen before VFS.
+maps.azimuth_deg(maps.azimuth_deg < cfg.azimuthRange_deg(1) | ...
+    maps.azimuth_deg > cfg.azimuthRange_deg(2)) = NaN;
+maps.elevation_deg(maps.elevation_deg < cfg.elevationRange_deg(1) | ...
+    maps.elevation_deg > cfg.elevationRange_deg(2)) = NaN;
 
 [azimuthDx,azimuthDy] = gradient(maps.azimuth_deg);
 [elevationDx,elevationDy] = gradient(maps.elevation_deg);
-azimuthGradientAngle = atan2(azimuthDy,azimuthDx);
-elevationGradientAngle = atan2(elevationDy,elevationDx);
+azimuthGradientAngle = atan2(-azimuthDy,azimuthDx);
+elevationGradientAngle = atan2(-elevationDy,elevationDx);
 maps.vfs = sin(elevationGradientAngle-azimuthGradientAngle);
-maps.vfs = nan_gaussian_filter( ...
-    maps.vfs,opts.vfs_smoothing_sigma);
+maps.vfsUnfiltered = maps.vfs;
+maps.vfs = haiderlab_vfs_post_filter(maps.vfs, ...
+    repetitionMaps(1).vfsPostFilterSigma_px);
 maps.vfs = max(-1,min(1,maps.vfs));
+maps.vfsPostFiltered = maps.vfs;
+
+maps.spatialFilterSigma_px = ...
+    repetitionMaps(1).spatialFilterSigma_px;
+maps.vfsPostFilterSigma_px = ...
+    repetitionMaps(1).vfsPostFilterSigma_px;
+maps.directionNames = cfg.directionNames;
+maps.azimuthRange_deg = cfg.azimuthRange_deg;
+maps.elevationRange_deg = cfg.elevationRange_deg;
 
 maps.retainedSweepCount = zeros( ...
     size(repetitionMaps(1).retainedSweepCount));
@@ -1409,6 +1387,26 @@ for repetitionIndex = 1:nRepetitions
     maps.retainedSweepCount = maps.retainedSweepCount + ...
         repetitionMaps(repetitionIndex).retainedSweepCount;
 end
+end
+
+
+function VFS = haiderlab_vfs_post_filter(VFS,th2)
+validVFS = isfinite(VFS);
+
+if ~any(validVFS(:))
+    return;
+end
+
+hh = fspecial('gaussian',size(VFS),th2);
+hh = hh/sum(hh(:));
+filterResponse = abs(fft2(hh));
+% Normalize filtering by valid support so screen-mask NaNs do not spread.
+validValues = zeros(size(VFS));
+validValues(validVFS) = VFS(validVFS);
+filteredVFS = real(ifft2(fft2(validValues).*filterResponse));
+validSupport = real(ifft2(fft2(double(validVFS)).*filterResponse));
+VFS(validVFS) = filteredVFS(validVFS)./validSupport(validVFS);
+VFS(~validVFS) = NaN;
 end
 
 
@@ -1465,8 +1463,8 @@ else
 end
 
 fig = figure('Visible',visibility,'Color','w', ...
-    'Position',[100 100 1500 900]);
-layout = tiledlayout(fig,2,3,'TileSpacing','compact', ...
+    'Position',[100 100 2000 550]);
+layout = tiledlayout(fig,1,4,'TileSpacing','compact', ...
     'Padding','compact');
 title(layout,figureTitle,'Interpreter','none');
 
@@ -1487,7 +1485,7 @@ colormap(ax2,turbo(256));
 colorbar(ax2);
 
 ax3 = nexttile(layout);
-imagesc(ax3,maps.vfs);
+imagesc(ax3,maps.vfsUnfiltered);
 axis(ax3,'image','off');
 title(ax3,'Visual field sign');
 clim(ax3,[-1 1]);
@@ -1495,34 +1493,87 @@ colormap(ax3,blue_white_red(256));
 colorbar(ax3);
 
 ax4 = nexttile(layout);
-imagesc(ax4,maps.azimuthCoherence);
+imagesc(ax4,maps.vfs);
 axis(ax4,'image','off');
-title(ax4,'Azimuth phase coherence');
-clim(ax4,[0 1]);
-colormap(ax4,parula(256));
+title(ax4,sprintf('Post-filter visual field sign (th2 = %g px)', ...
+    maps.vfsPostFilterSigma_px));
+clim(ax4,[-1 1]);
+colormap(ax4,blue_white_red(256));
 colorbar(ax4);
-
-ax5 = nexttile(layout);
-imagesc(ax5,maps.elevationCoherence);
-axis(ax5,'image','off');
-title(ax5,'Elevation phase coherence');
-clim(ax5,[0 1]);
-colormap(ax5,parula(256));
-colorbar(ax5);
-
-ax6 = nexttile(layout);
-pairAmplitude = sqrt(maps.azimuthAmplitude.*maps.elevationAmplitude);
-imagesc(ax6,log10(max(pairAmplitude,eps)));
-axis(ax6,'image','off');
-title(ax6,'log10 paired response amplitude');
-colormap(ax6,parula(256));
-colorbar(ax6);
 
 exportgraphics(fig,outputFile,'Resolution',200);
 
 if ~opts.show_figures
     close(fig);
 end
+end
+
+
+function plot_spatial_filter_comparison(overallMaps,sigmas,cfg,opts, ...
+        outputFile,figureTitle)
+if opts.show_figures
+    visibility = 'on';
+else
+    visibility = 'off';
+end
+
+nSigmas = numel(sigmas);
+fig = figure('Visible',visibility,'Color','w', ...
+    'Position',[100 100 2200 max(650,330*nSigmas)]);
+layout = tiledlayout(fig,nSigmas,4,'TileSpacing','compact', ...
+    'Padding','compact');
+title(layout,sprintf('%s: retained-trial spatial-filter comparison', ...
+    figureTitle),'Interpreter','none');
+
+for sigmaIndex = 1:nSigmas
+    maps = overallMaps{sigmaIndex};
+    sigma = sigmas(sigmaIndex);
+
+    ax1 = nexttile(layout);
+    imagesc(ax1,maps.azimuth_deg);
+    axis(ax1,'image','off');
+    title(ax1,sprintf('th1 = %g px | Azimuth',sigma));
+    clim(ax1,cfg.azimuthRange_deg);
+    colormap(ax1,turbo(256));
+    colorbar(ax1);
+
+    ax2 = nexttile(layout);
+    imagesc(ax2,maps.elevation_deg);
+    axis(ax2,'image','off');
+    title(ax2,sprintf('th1 = %g px | Elevation',sigma));
+    clim(ax2,cfg.elevationRange_deg);
+    colormap(ax2,turbo(256));
+    colorbar(ax2);
+
+    ax3 = nexttile(layout);
+    imagesc(ax3,maps.vfsUnfiltered);
+    axis(ax3,'image','off');
+    title(ax3,sprintf('th1 = %g px | VFS',sigma));
+    clim(ax3,[-1 1]);
+    colormap(ax3,blue_white_red(256));
+    colorbar(ax3);
+
+    ax4 = nexttile(layout);
+    imagesc(ax4,maps.vfs);
+    axis(ax4,'image','off');
+    title(ax4,sprintf(['th1 = %g px | Post-filter VFS ' ...
+        '(th2 = %g px)'],sigma,maps.vfsPostFilterSigma_px));
+    clim(ax4,[-1 1]);
+    colormap(ax4,blue_white_red(256));
+    colorbar(ax4);
+end
+
+exportgraphics(fig,outputFile,'Resolution',200);
+
+if ~opts.show_figures
+    close(fig);
+end
+end
+
+
+function label = spatial_filter_sigma_label(sigma)
+label = strrep(sprintf('%g',sigma),'.','p');
+label = strrep(label,'-','m');
 end
 
 
