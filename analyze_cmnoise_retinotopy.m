@@ -1189,6 +1189,7 @@ frame = double(tiffReader.read());
 if ndims(frame) == 3
     frame = mean(frame,3);
 end
+frame = rot90(frame,1);   % 90 deg CCW
 end
 
 
@@ -1309,8 +1310,8 @@ elevation_deg(elevation_deg < cfg.elevationRange_deg(1) | ...
 
 [azimuthDx,azimuthDy] = gradient(azimuth_deg);
 [elevationDx,elevationDy] = gradient(elevation_deg);
-azimuthGradientAngle = atan2(azimuthDy,azimuthDx);
-elevationGradientAngle = atan2(elevationDy,elevationDx);
+azimuthGradientAngle = atan2(-azimuthDy,azimuthDx);
+elevationGradientAngle = atan2(-elevationDy,elevationDx);
 vfs = sin(elevationGradientAngle-azimuthGradientAngle);
 vfsUnfiltered = vfs;
 vfs = haiderlab_vfs_post_filter(vfs,th2);
@@ -1363,8 +1364,8 @@ maps.elevation_deg(maps.elevation_deg < cfg.elevationRange_deg(1) | ...
 
 [azimuthDx,azimuthDy] = gradient(maps.azimuth_deg);
 [elevationDx,elevationDy] = gradient(maps.elevation_deg);
-azimuthGradientAngle = atan2(azimuthDy,azimuthDx);
-elevationGradientAngle = atan2(elevationDy,elevationDx);
+azimuthGradientAngle = atan2(-azimuthDy,azimuthDx);
+elevationGradientAngle = atan2(-elevationDy,elevationDx);
 maps.vfs = sin(elevationGradientAngle-azimuthGradientAngle);
 maps.vfsUnfiltered = maps.vfs;
 maps.vfs = haiderlab_vfs_post_filter(maps.vfs, ...
@@ -1685,6 +1686,7 @@ frame = double(frame);
 if ndims(frame) == 3
     frame = mean(frame,3);
 end
+frame = rot90(frame,1);   % 90 deg CCW
 end
 
 
