@@ -362,29 +362,18 @@ catch
 end
 
 try
-    src.ExposureAuto = 'Off';
-    src.ExposureTime = result.camera_exposure_us;
-catch ME
-    warning('Exposure setting failed: %s',ME.message);
-end
-
-try
-    src.GainAuto = 'Off';
-    src.Gain = result.camera_gain;
-catch ME
-    warning('Gain setting failed: %s',ME.message);
-end
-
-try
     src.BalanceWhiteAuto = 'Off';
 catch
 end
 
-try
-    src.BlackLevel = result.camera_black_level;
-catch ME
-    warning('Black-level setting failed: %s',ME.message);
-end
+result.camera.requestedFrameRate = result.camera_fps;
+result.camera.requestedExposure_us = result.camera_exposure_us;
+result.camera.requestedGain = result.camera_gain;
+result.camera.requestedBlackLevel = result.camera_black_level;
+result.camera.appliedSettingsBeforePreview = apply_camera_settings( ...
+    result.camera_fps,result.camera_exposure_us,result.camera_gain, ...
+    result.camera_black_level,"initialization");
+result.camera.appliedSettingsDuringPreview = struct();
 
 % Keep the preview in the camera's native bit depth. This avoids the
 % Image Acquisition Toolbox converting a Mono12/Mono16 preview to 8-bit.
@@ -400,6 +389,15 @@ if result.camera_preview
     try
         preview(vid);
         cameraPreviewStarted = true;
+
+        % Reapply settings after streaming starts. Some GenICam cameras do
+        % not expose the new value in their first queued preview frames
+        % even though the pre-preview property write succeeded.
+        result.camera.appliedSettingsDuringPreview = ...
+            apply_camera_settings(result.camera_fps, ...
+            result.camera_exposure_us, ...
+            result.camera_gain,result.camera_black_level, ...
+            "initial preview");
     catch ME
         warning('Camera preview failed: %s',ME.message);
         cameraPreviewStarted = false;
@@ -411,8 +409,8 @@ if result.camera_preview
             'using the camera.']);
     end
 
-    % Allow the preview figure and camera stream to initialize.
-    pause(0.5);
+    % Allow at least two newly configured frames to reach the preview.
+    pause(max(0.5,2/result.camera_fps));
     drawnow;
 
     disp('Adjust camera, then press any key / q to abort.');
@@ -642,24 +640,26 @@ if quitRequested
 end
 
 %% -------------------- Red-light main experiment --------------------
+redExposure_us = result.camera_exposure_us;
+
 if ~isempty(result.camera_red_exposure_us)
-    try
-        src.ExposureTime = result.camera_red_exposure_us;
-    catch ME
-        warning('Red exposure setting failed: %s',ME.message);
-    end
+    redExposure_us = result.camera_red_exposure_us;
 end
 
+redGain = result.camera_gain;
+
 if ~isempty(result.camera_red_gain)
-    try
-        src.Gain = result.camera_red_gain;
-    catch ME
-        warning('Red gain setting failed: %s',ME.message);
-    end
+    redGain = result.camera_red_gain;
 end
 
 result.redSetup.requestedExposure_us = result.camera_red_exposure_us;
 result.redSetup.requestedGain = result.camera_red_gain;
+result.redSetup.effectiveExposure_us = redExposure_us;
+result.redSetup.effectiveGain = redGain;
+result.redSetup.appliedSettingsBeforePreview = ...
+    apply_camera_settings(result.camera_fps,redExposure_us,redGain, ...
+    result.camera_black_level,"red setup");
+result.redSetup.appliedSettingsDuringPreview = struct();
 result.redSetup.previewIntensity = struct();
 
 Screen('FillRect',wininfo.w,[128,128,128]);
@@ -689,7 +689,11 @@ if result.red_setup_preview
     try
         preview(vid);
         cameraPreviewStarted = true;
-        pause(0.5);
+        result.redSetup.appliedSettingsDuringPreview = ...
+            apply_camera_settings(result.camera_fps, ...
+            redExposure_us,redGain, ...
+            result.camera_black_level,"red preview");
+        pause(max(0.5,2/result.camera_fps));
         drawnow;
     catch ME
         warning('Red setup preview failed: %s',ME.message);
@@ -1072,6 +1076,172 @@ if ~quitRequested
 end
 
 %%%%% ALL THE INNER FXNS %%%%%
+
+    function appliedSettings = apply_camera_settings( ...
+            requestedFPS,requestedExposure_us,requestedGain, ...
+            requestedBlackLevel,settingContext)
+        % Write dependent GenICam settings in controller-first order and
+        % read them back. Repeating a write handles devices that expose a
+        % stale value briefly while their acquisition state is changing.
+        appliedSettings = struct();
+        appliedSettings.context = string(settingContext);
+
+        [appliedSettings.frameRate, ...
+            appliedSettings.frameRateVerified, ...
+            appliedSettings.frameRateCommanded, ...
+            appliedSettings.frameRateLimits] = ...
+            set_camera_property_verified( ...
+            'AcquisitionFrameRate',requestedFPS,settingContext);
+
+        [appliedSettings.exposureAuto, ...
+            appliedSettings.exposureAutoVerified] = ...
+            set_camera_property_verified( ...
+            'ExposureAuto','Off',settingContext);
+        [appliedSettings.exposureTime_us, ...
+            appliedSettings.exposureTimeVerified, ...
+            appliedSettings.exposureTimeCommanded_us, ...
+            appliedSettings.exposureTimeLimits_us] = ...
+            set_camera_property_verified( ...
+            'ExposureTime',requestedExposure_us,settingContext);
+
+        [appliedSettings.gainAuto, ...
+            appliedSettings.gainAutoVerified] = ...
+            set_camera_property_verified( ...
+            'GainAuto','Off',settingContext);
+        [appliedSettings.gain,appliedSettings.gainVerified, ...
+            appliedSettings.gainCommanded, ...
+            appliedSettings.gainLimits] = ...
+            set_camera_property_verified( ...
+            'Gain',requestedGain,settingContext);
+
+        [appliedSettings.blackLevel, ...
+            appliedSettings.blackLevelVerified, ...
+            appliedSettings.blackLevelCommanded, ...
+            appliedSettings.blackLevelLimits] = ...
+            set_camera_property_verified( ...
+            'BlackLevel',requestedBlackLevel,settingContext);
+
+        fprintf(['Camera settings [%s], requested -> applied: ' ...
+            'FPS %s -> %s, exposure %s -> %s us, ' ...
+            'gain %s -> %s, black level %s -> %s.\n'], ...
+            char(string(settingContext)), ...
+            camera_value_to_text(requestedFPS), ...
+            camera_value_to_text(appliedSettings.frameRate), ...
+            camera_value_to_text(requestedExposure_us), ...
+            camera_value_to_text(appliedSettings.exposureTime_us), ...
+            camera_value_to_text(requestedGain), ...
+            camera_value_to_text(appliedSettings.gain), ...
+            camera_value_to_text(requestedBlackLevel), ...
+            camera_value_to_text(appliedSettings.blackLevel));
+    end
+
+    function [appliedValue,isVerified,commandedValue, ...
+            constraintLimits] = ...
+            set_camera_property_verified( ...
+            propertyName,requestedValue,settingContext)
+        propertyName = char(string(propertyName));
+        appliedValue = [];
+        isVerified = false;
+        commandedValue = requestedValue;
+        constraintLimits = [];
+        lastErrorMessage = "";
+        maxAttempts = 3;
+
+        if isnumeric(requestedValue) && isscalar(requestedValue)
+            try
+                propertyInfo = propinfo(src,propertyName);
+
+                if strcmpi(propertyInfo.Constraint,'bounded') && ...
+                        isnumeric(propertyInfo.ConstraintValue) && ...
+                        numel(propertyInfo.ConstraintValue) >= 2
+                    constraintLimits = double( ...
+                        propertyInfo.ConstraintValue([1,end]));
+                    commandedValue = min(max(double(requestedValue), ...
+                        constraintLimits(1)),constraintLimits(2));
+
+                    if commandedValue ~= double(requestedValue)
+                        warning( ...
+                            ['run_cmnoise_green_red:' ...
+                            'CameraSettingAdjusted'], ...
+                            ['Camera setting %s [%s] requested %s, ' ...
+                            'but the current allowed range is ' ...
+                            '[%s, %s]. Applying %s instead.'], ...
+                            propertyName,char(string(settingContext)), ...
+                            camera_value_to_text(requestedValue), ...
+                            camera_value_to_text(constraintLimits(1)), ...
+                            camera_value_to_text(constraintLimits(2)), ...
+                            camera_value_to_text(commandedValue));
+                    end
+                end
+            catch ME
+                % A missing constraint must not prevent the normal property
+                % write. Preserve the diagnostic in case that write fails.
+                lastErrorMessage = string(ME.message);
+            end
+        end
+
+        for settingAttempt = 1:maxAttempts
+            try
+                src.(propertyName) = commandedValue;
+                pause(0.05);
+                appliedValue = src.(propertyName);
+
+                if camera_property_values_match( ...
+                        commandedValue,appliedValue)
+                    isVerified = true;
+                    return;
+                end
+            catch ME
+                lastErrorMessage = string(ME.message);
+            end
+
+            pause(0.05*settingAttempt);
+        end
+
+        if strlength(lastErrorMessage) > 0
+            warning('run_cmnoise_green_red:CameraSettingNotApplied', ...
+                ['Camera setting %s [%s] could not be applied. ' ...
+                'Requested %s, commanded %s. Last error: %s'], ...
+                propertyName,char(string(settingContext)), ...
+                camera_value_to_text(requestedValue), ...
+                camera_value_to_text(commandedValue), ...
+                char(lastErrorMessage));
+        else
+            warning('run_cmnoise_green_red:CameraSettingNotVerified', ...
+                ['Camera setting %s [%s] did not match after %d ' ...
+                'attempts. Commanded %s, read back %s.'], ...
+                propertyName,char(string(settingContext)),maxAttempts, ...
+                camera_value_to_text(commandedValue), ...
+                camera_value_to_text(appliedValue));
+        end
+    end
+
+    function valuesMatch = camera_property_values_match( ...
+            requestedValue,appliedValue)
+        if (isnumeric(requestedValue) || islogical(requestedValue)) && ...
+                (isnumeric(appliedValue) || islogical(appliedValue)) && ...
+                isscalar(requestedValue) && isscalar(appliedValue)
+            requestedNumeric = double(requestedValue);
+            appliedNumeric = double(appliedValue);
+            numericTolerance = max(1e-6, ...
+                1e-3*max(1,abs(requestedNumeric)));
+            valuesMatch = isfinite(appliedNumeric) && ...
+                abs(appliedNumeric-requestedNumeric) <= numericTolerance;
+        else
+            valuesMatch = strcmpi(strtrim(string(appliedValue)), ...
+                strtrim(string(requestedValue)));
+        end
+    end
+
+    function valueText = camera_value_to_text(value)
+        if isempty(value)
+            valueText = '<unavailable>';
+        elseif isnumeric(value) || islogical(value)
+            valueText = sprintf('%.9g',double(value));
+        else
+            valueText = char(string(value));
+        end
+    end
 
     function run_green_imaging_session(sessionIndex)
         validateattributes(sessionIndex,{'numeric'}, ...
