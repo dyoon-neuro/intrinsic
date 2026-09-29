@@ -8,7 +8,7 @@ function result = run_cmnoise_green_red(varargin)
 p = inputParser;
 p.addParameter('rig',0);
 p.addParameter('skipsynctests',1);
-p.addParameter('animalid','int03');
+p.addParameter('animalid','c03');
 p.addParameter('depth','000');
 p.addParameter('repetitions',5);
 p.addParameter('stimduration',180);
@@ -40,9 +40,9 @@ p.addParameter('stimFolderRemote', ...
 
 %% -------------------- Camera parameters --------------------
 p.addParameter('camera_device_id',1);
-p.addParameter('camera_video_format','');
-p.addParameter('camera_fps',10);
-p.addParameter('camera_exposure_us',100000);
+p.addParameter('camera_video_format','Mono16');
+p.addParameter('camera_fps',5);
+p.addParameter('camera_exposure_us',50000);
 p.addParameter('camera_gain',18);
 p.addParameter('camera_red_exposure_us',[]);
 p.addParameter('camera_red_gain',[]);
@@ -209,29 +209,37 @@ result.do_msock = 0;
 result.stimFolderLocal = 'D:\Users\USER\VisStimData\';
 result.exptid = '101_camera';
 
-if ~exist(result.camera_save_folder,'dir')
-    mkdir(result.camera_save_folder);
-end
-
-% Create a unique date-based folder for this experiment.
-% Examples:
-%   Chameleon3_TIFF_Trials\20260720
-%   Chameleon3_TIFF_Trials\20260720_1
-%   Chameleon3_TIFF_Trials\20260720_2
-dateBaseName = datestr(now,'yyyymmdd');
-sessionName = dateBaseName;
-sessionIndex = 0;
-
-while exist(fullfile(result.camera_save_folder,sessionName),'dir')
-    sessionIndex = sessionIndex + 1;
-    sessionName = sprintf('%s_%d',dateBaseName,sessionIndex);
-end
-
 cameraRootFolder = result.camera_save_folder;
-cameraSessionFolder = fullfile(cameraRootFolder,sessionName);
+
+if ~exist(cameraRootFolder,'dir')
+    mkdir(cameraRootFolder);
+end
+
+% Store each experiment in a subject-specific folder inside today's folder.
+% Examples:
+%   D:\intrinsic\20260720\c03_1
+%   D:\intrinsic\20260720\c03_2
+dateFolderName = datestr(now,'yyyymmdd');
+cameraDateFolder = fullfile(cameraRootFolder,dateFolderName);
+
+if ~exist(cameraDateFolder,'dir')
+    mkdir(cameraDateFolder);
+end
+
+subjectName = char(string(result.animalid));
+sessionSequence = 1;
+sessionName = sprintf('%s_%d',subjectName,sessionSequence);
+
+while exist(fullfile(cameraDateFolder,sessionName),'dir')
+    sessionSequence = sessionSequence + 1;
+    sessionName = sprintf('%s_%d',subjectName,sessionSequence);
+end
+
+cameraSessionFolder = fullfile(cameraDateFolder,sessionName);
 mkdir(cameraSessionFolder);
 
 result.camera_root_folder = cameraRootFolder;
+result.camera_date_folder = cameraDateFolder;
 result.camera_session_name = sessionName;
 result.camera_save_folder = cameraSessionFolder;
 
@@ -388,6 +396,14 @@ try
     src.BlackLevel = result.camera_black_level;
 catch ME
     warning('Black-level setting failed: %s',ME.message);
+end
+
+% Keep the preview in the camera's native bit depth. This avoids the
+% Image Acquisition Toolbox converting a Mono12/Mono16 preview to 8-bit.
+try
+    vid.PreviewFullBitDepth = 'on';
+catch ME
+    warning('Full-bit-depth preview setting failed: %s',ME.message);
 end
 
 if result.camera_preview

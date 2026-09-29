@@ -28,8 +28,8 @@ p.addParameter('stimFolderRemote', ...
 
 %% -------------------- Camera parameters --------------------
 p.addParameter('camera_device_id',1);
-p.addParameter('camera_fps',30);
-p.addParameter('camera_exposure_us',30000);
+p.addParameter('camera_fps',10);
+p.addParameter('camera_exposure_us',50000);
 p.addParameter('camera_gain',18);
 p.addParameter('camera_black_level',0);
 p.addParameter('camera_preview',1);
