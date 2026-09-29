@@ -41,8 +41,8 @@ p.addParameter('stimFolderRemote', ...
 %% -------------------- Camera parameters --------------------
 p.addParameter('camera_device_id',1);
 p.addParameter('camera_video_format','Mono16');
-p.addParameter('camera_fps',5);
-p.addParameter('camera_exposure_us',50000);
+p.addParameter('camera_fps',10);
+p.addParameter('camera_exposure_us',100000);
 p.addParameter('camera_gain',18);
 p.addParameter('camera_red_exposure_us',[]);
 p.addParameter('camera_red_gain',[]);
@@ -211,20 +211,14 @@ result.exptid = '101_camera';
 
 cameraRootFolder = result.camera_save_folder;
 
-if ~exist(cameraRootFolder,'dir')
-    mkdir(cameraRootFolder);
-end
-
 % Store each experiment in a subject-specific folder inside today's folder.
+% Folder creation is deferred until the camera preview is accepted so that
+% quitting after preview does not leave an empty experiment folder.
 % Examples:
 %   D:\intrinsic\20260720\c03_1
 %   D:\intrinsic\20260720\c03_2
 dateFolderName = datestr(now,'yyyymmdd');
 cameraDateFolder = fullfile(cameraRootFolder,dateFolderName);
-
-if ~exist(cameraDateFolder,'dir')
-    mkdir(cameraDateFolder);
-end
 
 subjectName = char(string(result.animalid));
 sessionSequence = 1;
@@ -236,21 +230,15 @@ while exist(fullfile(cameraDateFolder,sessionName),'dir')
 end
 
 cameraSessionFolder = fullfile(cameraDateFolder,sessionName);
-mkdir(cameraSessionFolder);
 
 result.camera_root_folder = cameraRootFolder;
 result.camera_date_folder = cameraDateFolder;
 result.camera_session_name = sessionName;
 result.camera_save_folder = cameraSessionFolder;
 
-fprintf('Camera files will be saved in: %s\n', ...
-    result.camera_save_folder);
-
 if result.do_msock
     sock = msPrep();
 end
-
-[result,fnameLocal,fnameRemote] = saveFilePrep(result);
 
 %% -------------------- Cross-clock calibration --------------------
 % Repeated PC-wall-clock <-> PTB GetSecs anchor pairs make it possible to
@@ -450,6 +438,23 @@ if result.camera_preview
         drawnow;
     end
 end
+
+% Create the output folders only after preview has been accepted. When
+% camera_preview is disabled, create them immediately before display setup.
+if ~exist(cameraRootFolder,'dir')
+    mkdir(cameraRootFolder);
+end
+
+if ~exist(cameraDateFolder,'dir')
+    mkdir(cameraDateFolder);
+end
+
+mkdir(cameraSessionFolder);
+
+[result,fnameLocal,fnameRemote] = saveFilePrep(result);
+
+fprintf('Camera files will be saved in: %s\n', ...
+    result.camera_save_folder);
 
 %% -------------------- Psychtoolbox initialization --------------------
 try
