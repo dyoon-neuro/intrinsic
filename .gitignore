@@ -1,3 +1,7 @@
 *.exe
 run_cmnoise_kt.m
 untitled.m
+stimulus_preview/nasal_to_temporal_early.png
+stimulus_preview/nasal_to_temporal_late.png
+stimulus_preview/nasal_to_temporal_middle.png
+render_nasal_to_temporal_preview.m

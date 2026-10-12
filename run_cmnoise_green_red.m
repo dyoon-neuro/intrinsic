@@ -14,7 +14,7 @@ p.addParameter('repetitions',5);
 p.addParameter('stimduration',180);
 p.addParameter('isipre',5); % Per-block gray baseline used by analysis.
 p.addParameter('isipost',3);
-p.addParameter('DScreen',8);
+p.addParameter('DScreen',10);
 p.addParameter('VertScreenSize',15);
 p.addParameter('HorzScreenSize',20);
 p.addParameter('fullscreen',1);
