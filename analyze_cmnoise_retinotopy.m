@@ -1,10 +1,11 @@
 function analysis = analyze_cmnoise_retinotopy(sessionFolder,varargin)
-%ANALYZE_CMNOISE_RETINOTOPY Analyze green or red intrinsic imaging data.
+%ANALYZE_CMNOISE_RETINOTOPY Analyze short or long green-light imaging data.
 %   ANALYZE_CMNOISE_RETINOTOPY opens a Windows folder-selection dialog and
 %   analyzes the selected acquisition session folder.
 %
 %   ANALYSIS = ANALYZE_CMNOISE_RETINOTOPY(SESSIONFOLDER) interactively
-%   selects a green-light or red-light recording from SESSIONFOLDER.
+%   selects a short or long green-light recording from SESSIONFOLDER.
+%   Legacy green/red recordings and session_type values remain supported.
 %
 %   The pipeline implements the processing described in Nsiangani et al.
 %   (Scientific Reports, 2022; doi:10.1038/s41598-022-05932-2):
@@ -21,12 +22,12 @@ function analysis = analyze_cmnoise_retinotopy(sessionFolder,varargin)
 %       analyze_cmnoise_retinotopy('D:\intrinsic\20260811')
 %
 %   Example noninteractive use:
-%       analyze_cmnoise_retinotopy(folder,'session_type','red')
-%       analyze_cmnoise_retinotopy(folder,'session_type','green', ...
-%           'green_session_index',1)
+%       analyze_cmnoise_retinotopy(folder,'session_type','long')
+%       analyze_cmnoise_retinotopy(folder,'session_type','short', ...
+%           'short_session_index',1)
 %
 %   Block-level parallel processing (Parallel Computing Toolbox):
-%       analyze_cmnoise_retinotopy(folder,'session_type','red', ...
+%       analyze_cmnoise_retinotopy(folder,'session_type','long', ...
 %           'use_parallel',true,'num_workers',8)
 
 if nargin < 1 || isempty(sessionFolder) || ...
@@ -47,6 +48,10 @@ p = inputParser;
 p.addRequired('sessionFolder',@(x)ischar(x) || isstring(x));
 p.addParameter('session_type','ask', ...
     @(x)ischar(x) || isstring(x));
+p.addParameter('short_session_index',[], ...
+    @(x)isempty(x) || (isnumeric(x) && isscalar(x) && ...
+    isfinite(x) && x >= 1 && mod(x,1) == 0));
+% Legacy option for analyzing previously recorded green sessions.
 p.addParameter('green_session_index',[], ...
     @(x)isempty(x) || (isnumeric(x) && isscalar(x) && ...
     isfinite(x) && x >= 1 && mod(x,1) == 0));
@@ -106,6 +111,13 @@ p.addParameter('parallel_block_batch_size',[], ...
     isfinite(x) && x >= 1 && mod(x,1) == 0));
 p.parse(sessionFolder,varargin{:});
 opts = p.Results;
+if ~isempty(opts.green_session_index)
+    if ~isempty(opts.short_session_index) && ...
+            opts.short_session_index ~= opts.green_session_index
+        error('short_session_index and green_session_index must agree.');
+    end
+    opts.short_session_index = opts.green_session_index;
+end
 opts.register_blocks = logical(opts.register_blocks);
 opts.register_sweeps = logical(opts.register_sweeps);
 opts.show_figures = logical(opts.show_figures);
@@ -144,11 +156,11 @@ sessionType = select_session_type(opts.session_type);
 opts = configure_parallel_processing(opts);
 
 if strlength(string(opts.output_folder)) == 0
-    if strcmp(cfg.sessionType,'green')
+    if strcmp(cfg.sessionType,'short')
         outputFolder = fullfile(sessionFolder,sprintf( ...
-            'analysis_green_session%02d',cfg.greenSessionIndex));
+            'analysis_short_session%02d',cfg.shortSessionIndex));
     else
-        outputFolder = fullfile(sessionFolder,'analysis_red');
+        outputFolder = fullfile(sessionFolder,'analysis_long');
     end
 else
     outputFolder = char(string(opts.output_folder));
@@ -158,8 +170,8 @@ if ~isfolder(outputFolder)
     mkdir(outputFolder);
 end
 
-fprintf('\nAnalyzing %s-light imaging from: %s\n', ...
-    upper(cfg.sessionType),sessionFolder);
+fprintf('\nAnalyzing %s %s-light imaging from: %s\n', ...
+    upper(cfg.sessionType),upper(cfg.imagingLight),sessionFolder);
 fprintf('Output folder: %s\n',outputFolder);
 if opts.parallel_enabled
     fprintf(['BigTIFF processing: block-level parallel, %d workers, ' ...
@@ -367,7 +379,8 @@ analysis.sessionFolder = string(sessionFolder);
 analysis.resultFile = string(resultFile);
 analysis.outputFolder = string(outputFolder);
 analysis.sessionType = string(cfg.sessionType);
-analysis.greenSessionIndex = cfg.greenSessionIndex;
+analysis.imagingLight = string(cfg.imagingLight);
+analysis.shortSessionIndex = cfg.shortSessionIndex;
 analysis.config = cfg;
 analysis.options = opts;
 analysis.baseline = baselineInfo;
@@ -560,33 +573,52 @@ sessionType = lower(strtrim(char(string(requestedType))));
 if strcmp(sessionType,'ask') || isempty(sessionType)
     while true
         answer = lower(strtrim(input( ...
-            'Analyze green or red imaging? [g/r]: ','s')));
+            'Analyze short or long green-light imaging? [s/l]: ','s')));
 
-        if ismember(answer,{'g','green'})
-            sessionType = 'green';
+        if ismember(answer,{'s','short'})
+            sessionType = 'short';
             break;
-        elseif ismember(answer,{'r','red'})
-            sessionType = 'red';
+        elseif ismember(answer,{'l','long'})
+            sessionType = 'long';
             break;
         end
     end
 end
 
-if ~ismember(sessionType,{'green','red'})
-    error('session_type must be ask, green, or red.');
-end
+% Accept the former color names for existing analysis scripts.
+if ismember(sessionType,{'g','green','s'})
+    sessionType = 'short';
+elseif ismember(sessionType,{'r','red','l'})
+    sessionType = 'long';
 end
 
+if ~ismember(sessionType,{'short','long'})
+    error('session_type must be ask, short, or long.');
+end
+end
 
 function [cfg,opts] = build_analysis_config( ...
         result,sessionFolder,resultFile,sessionType,opts)
+% Older files stored short sessions under result.green; long data has
+% always been stored in the top-level block and camera structures.
+if ~isfield(result,'short') && isfield(result,'green')
+    result.short = result.green;
+end
+
 cfg = struct();
 cfg.sessionType = sessionType;
+cfg.imagingLight = 'green';
+if isfield(result,'imaging_light')
+    cfg.imagingLight = char(string(result.imaging_light));
+elseif strcmp(sessionType,'long')
+    % Preserve the actual illumination of legacy long (red) recordings.
+    cfg.imagingLight = 'red';
+end
 cfg.sessionFolder = string(sessionFolder);
 cfg.resultFile = string(resultFile);
 cfg.cameraFPS = double(result.camera_fps);
 cfg.preITI_sec = double(result.isipre);
-cfg.greenSessionIndex = NaN;
+cfg.shortSessionIndex = NaN;
 cfg.azimuthPhaseSign = double(opts.azimuth_phase_sign);
 cfg.elevationPhaseSign = double(opts.elevation_phase_sign);
 
@@ -634,36 +666,36 @@ else
     cfg.elevationRange_deg = double(opts.elevation_range_deg(:)');
 end
 
-if strcmp(sessionType,'green')
-    if ~isfield(result,'green') || ...
-            ~isfield(result.green,'sessions') || ...
-            isempty(result.green.sessions)
-        error('No green-light session exists in the result file.');
+if strcmp(sessionType,'short')
+    if ~isfield(result,'short') || ...
+            ~isfield(result.short,'sessions') || ...
+            isempty(result.short.sessions)
+        error('No short green-light session exists in the result file.');
     end
 
-    nGreenSessions = numel(result.green.sessions);
-    greenSessionIndex = opts.green_session_index;
+    nShortSessions = numel(result.short.sessions);
+    shortSessionIndex = opts.short_session_index;
 
-    if isempty(greenSessionIndex)
-        if nGreenSessions == 1
-            greenSessionIndex = 1;
+    if isempty(shortSessionIndex)
+        if nShortSessions == 1
+            shortSessionIndex = 1;
         else
-            fprintf('Available green sessions: 1-%d\n',nGreenSessions);
-            greenSessionIndex = input('Green session index to analyze: ');
+            fprintf('Available short sessions: 1-%d\n',nShortSessions);
+            shortSessionIndex = input('Short session index to analyze: ');
         end
     end
 
-    if greenSessionIndex < 1 || greenSessionIndex > nGreenSessions
-        error('green_session_index must be between 1 and %d.', ...
-            nGreenSessions);
+    if shortSessionIndex < 1 || shortSessionIndex > nShortSessions
+        error('short_session_index must be between 1 and %d.', ...
+            nShortSessions);
     end
 
-    greenSession = result.green.sessions(greenSessionIndex);
+    shortSession = result.short.sessions(shortSessionIndex);
 
-    cfg.greenSessionIndex = greenSessionIndex;
-    cfg.nBlocks = numel(greenSession.block.names);
-    cfg.sweepsPerBlock = double(result.green.sweeps_per_block);
-    cfg.blockNames = string(greenSession.block.names(:));
+    cfg.shortSessionIndex = shortSessionIndex;
+    cfg.nBlocks = numel(shortSession.block.names);
+    cfg.sweepsPerBlock = double(result.short.sweeps_per_block);
+    cfg.blockNames = string(shortSession.block.names(:));
     cfg.blockRepetition = nan(cfg.nBlocks,1);
 
     for blockIndex = 1:cfg.nBlocks
@@ -671,7 +703,7 @@ if strcmp(sessionType,'green')
             '_(\d+)$','tokens','once');
 
         if isempty(suffix)
-            % Backward compatibility for older green recordings whose
+            % Backward compatibility for older short recordings whose
             % block names did not include a repetition suffix.
             cfg.blockRepetition(blockIndex) = ceil(blockIndex/4);
         else
@@ -681,30 +713,30 @@ if strcmp(sessionType,'green')
 
     cfg.nRepetitions = max(cfg.blockRepetition);
 
-    if isfield(result.green,'repetitions_per_session')
-        recordedGreenRepetitions = double( ...
-            result.green.repetitions_per_session);
+    if isfield(result.short,'repetitions_per_session')
+        recordedShortRepetitions = double( ...
+            result.short.repetitions_per_session);
 
-        if isscalar(recordedGreenRepetitions) && ...
-                isfinite(recordedGreenRepetitions) && ...
-                recordedGreenRepetitions >= 1 && ...
-                mod(recordedGreenRepetitions,1) == 0 && ...
-                recordedGreenRepetitions ~= cfg.nRepetitions
-            warning(['Green repetition metadata reports %d sets, but ' ...
+        if isscalar(recordedShortRepetitions) && ...
+                isfinite(recordedShortRepetitions) && ...
+                recordedShortRepetitions >= 1 && ...
+                mod(recordedShortRepetitions,1) == 0 && ...
+                recordedShortRepetitions ~= cfg.nRepetitions
+            warning(['Short repetition metadata reports %d sets, but ' ...
                 'the recorded block names contain %d. Block names will ' ...
-                'be used for analysis.'],recordedGreenRepetitions, ...
+                'be used for analysis.'],recordedShortRepetitions, ...
                 cfg.nRepetitions);
         end
     end
 
     cfg.blockFiles = resolve_recorded_paths( ...
-        greenSession.camera.tifFile,sessionFolder);
-    cfg.blockFrameTimes = greenSession.camera.frameTime_sec;
+        shortSession.camera.tifFile,sessionFolder);
+    cfg.blockFrameTimes = shortSession.camera.frameTime_sec;
     cfg.blockStartGetSecs = double( ...
-        greenSession.camera.startGetSecs_sec(:));
+        shortSession.camera.startGetSecs_sec(:));
     cfg.blockFirstStimFlip_sec = double( ...
-        greenSession.block.firstStimFlip_sec(:));
-    cfg.ptbT0GetSecs_sec = double(greenSession.ptbT0GetSecs_sec);
+        shortSession.block.firstStimFlip_sec(:));
+    cfg.ptbT0GetSecs_sec = double(shortSession.ptbT0GetSecs_sec);
 else
     cfg.nRepetitions = double(result.block.repetitions);
     cfg.nBlocks = numel(result.block.names);
@@ -763,12 +795,12 @@ cfg.baselineReferenceSource = "first_block_preiti";
 
 cfg.period_sec = repmat(double(result.contrast_period),cfg.nBlocks,1);
 
-if strcmp(sessionType,'green') && ...
-        isfield(greenSession,'block') && ...
-        isfield(greenSession.block,'period_sec') && ...
-        numel(greenSession.block.period_sec) == cfg.nBlocks
-    cfg.period_sec = double(greenSession.block.period_sec(:));
-elseif strcmp(sessionType,'red') && ...
+if strcmp(sessionType,'short') && ...
+        isfield(shortSession,'block') && ...
+        isfield(shortSession.block,'period_sec') && ...
+        numel(shortSession.block.period_sec) == cfg.nBlocks
+    cfg.period_sec = double(shortSession.block.period_sec(:));
+elseif strcmp(sessionType,'long') && ...
         isfield(result.block,'period_sec') && ...
         numel(result.block.period_sec) == cfg.nBlocks
     cfg.period_sec = double(result.block.period_sec(:));
@@ -1253,7 +1285,8 @@ end
 function qcTable = make_qc_table(cfg,blockIndex,blockResult)
 nSweeps = numel(blockResult.framesPerSweep);
 SessionType = repmat(string(cfg.sessionType),nSweeps,1);
-GreenSession = repmat(cfg.greenSessionIndex,nSweeps,1);
+ImagingLight = repmat(string(cfg.imagingLight),nSweeps,1);
+ShortSession = repmat(cfg.shortSessionIndex,nSweeps,1);
 Repetition = repmat(cfg.blockRepetition(blockIndex),nSweeps,1);
 BlockIndex = repmat(blockIndex,nSweeps,1);
 BlockName = repmat(cfg.blockNames(blockIndex),nSweeps,1);
@@ -1266,7 +1299,7 @@ RegistrationShiftX_pix = ...
 RegistrationShiftY_pix = ...
     blockResult.sweepRegistrationShiftXY_pix(:,2);
 TIFF_File = repmat(string(cfg.blockFiles{blockIndex}),nSweeps,1);
-qcTable = table(SessionType,GreenSession,Repetition,BlockIndex, ...
+qcTable = table(SessionType,ImagingLight,ShortSession,Repetition,BlockIndex, ...
     BlockName,SweepIndex,NormalizedVariance,Retained,FrameCount, ...
     RegistrationShiftX_pix, ...
     RegistrationShiftY_pix,TIFF_File);

@@ -9,14 +9,15 @@ function analysis = analyze_cmnoise_retinotopy_parallel(sessionFolder,varargin)
 %   parallel options include:
 %       'num_workers'               requested process-worker count
 %       'parallel_block_batch_size' maximum in-memory block results
-%   Green-light analysis automatically groups all recorded direction-set
-%   repetitions in the selected green session using the block-name suffix.
+%   Both short and long recordings use green illumination. Short analysis
+%   groups all direction-set repetitions in the selected short session
+%   using the block-name suffix.
 %
 %   Examples:
 %       analyze_cmnoise_retinotopy_parallel(folder, ...
-%           'session_type','red','num_workers',8)
+%           'session_type','long','num_workers',8)
 %       analyze_cmnoise_retinotopy_parallel(folder, ...
-%           'session_type','green','green_session_index',1)
+%           'session_type','short','short_session_index',1)
 
 if nargin < 1
     sessionFolder = [];
