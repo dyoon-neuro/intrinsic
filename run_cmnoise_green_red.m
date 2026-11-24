@@ -5,7 +5,7 @@ function result = run_cmnoise_green_red(varargin)
 %   retained for existing callers. Short sessions can be repeated before
 %   continuing to the long recording.
 %   short_repetitions / short_sweeps_per_block default to 1 / 5.
-%   long_repetitions / long_sweeps_per_block default to 5 / 10.
+%   long_repetitions / long_sweeps_per_block default to 5 / 5.
 %   The original repetitions / sweeps_per_block options also set long runs.
 %   Short recordings are stored in result.short.sessions; the long
 %   recording remains in result.block / result.camera.
@@ -39,7 +39,7 @@ p.addParameter('aperture_width_deg',12);
 p.addParameter('contrast_period',18);
 p.addParameter('match_elevation_speed',true);
 p.addParameter('counterbalance_block_order',true);
-p.addParameter('sweeps_per_block',10);
+p.addParameter('sweeps_per_block',5);
 p.addParameter('short_repetitions',1);
 p.addParameter('short_sweeps_per_block',5);
 p.addParameter('long_repetitions',[]);
